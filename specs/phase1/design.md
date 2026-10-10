@@ -143,17 +143,17 @@ erDiagram
 - `shift_plan`：`work2_rest4` 或 `custom`。上二休四保存锚点日。
 - `meal_template`：每个用户一份个人 DSL。脚本、LLM 和轻度改餐都写回这一份，内容为各餐是否报餐及食堂。
 - `meal_order`：唯一键 `(account_id, meal_date, slot)`。`slot` 仅为 `breakfast | lunch | dinner`。记录 `canteen_id`、来源 `dsl`、`submitted_at`、`locked_at`。
-- `dish`：属于一个食堂。`kind` 必填，只能是 `菜`、`饭` 或 `汤`。菜是热菜、凉菜等菜肴，饭是米饭、面食等主食，汤是汤。没有第四类。缺少类别或写入这三类以外的值时拒绝。另有启用 / 停用状态。停用只来自食堂人员或管理员的显式操作。`image_path` 可空，指向 `dish_image_dir` 下的一张图片；库里不存图片字节。
+- `dish`：属于一个食堂。`kind` 必填，只能是 `菜`、`饭` 或 `汤`。菜是热菜、凉菜等菜肴，饭是米饭、面食等主食，汤是汤。没有第四类。缺少类别或写入这三类以外的值时拒绝。另有启用 / 停用状态。停用只来自食堂人员或管理员的显式操作。`image_path` 可空，是 `dish_image_dir` 下的对象相对路径；库里不存图片字节。接口在有路径时返回 `image_url`，否则为 null。`taste_tags` 是可空的短标签列表，由 `menu.write` 维护，例如酸、甜、开胃。
 - `menu_pick`：某食堂、某日、某餐已选定的餐品。唯一键 `(canteen_id, meal_date, slot, dish_id)`。`slot` 仅为 `breakfast | lunch | dinner`。每条带上所属 `dish` 的 `kind`。勾选写入，取消删除。只能引用该食堂当前启用的餐品。
 - `score`：唯一键 `(account_id, meal_date, slot, dish_id)`，分数为 `smallint`，只允许 −2 到 2 的整数。
 - `comment`：可选，挂在 `score` 上，最长 300 字，含匿名标记与 `deleted_at`。没有对应分数就不能插入评语。
 - `preference`：`(account_id, dish_id)` 的隐藏数值，只供服务端计算。
 - `notification`：站内提示。
-- `llm_channel`：属于配置者账号，含顺序、渠道种类、base URL、模型名和加密后的 key。
+- `llm_channel`：全站一份列表，由持有 `system.super` 的总管理维护。字段为顺序、渠道种类、base URL、模型名和加密后的 key。不属于员工账号。
 - `audit_log`：时间、操作者、当时使用的角色、食堂范围或 `*`、动作、对象、不含密钥的摘要。
 - `app_setting`：可在运行中修改的均分阈值和样本量下限。截止钟点仍以配置文件为准。
 
-隐藏偏好采用该用户对该餐品历次明线分数的算术平均，并保存样本数。这个数值只存在于 `preference` 和选菜计算中。选菜排序在菜、饭、汤每一类内部，把该日该餐预计在该食堂就餐的人对同一道候选的偏好取平均，平均更高的排在该类前面；该类中无人评分的排在有评分的之后，并使用中性颜色。上色按该类内的排序位置分成有限色阶，色块不标注数字。三类各自成组返回，不排进同一条混合列表。
+隐藏偏好采用该用户对该餐品历次明线分数的算术平均，并保存样本数。这个数值只存在于 `preference` 和选菜计算中。选菜排序在菜、饭、汤每一类内部，把该日该餐预计在该食堂就餐的人对同一道候选的偏好取平均，平均更高的排在该类前面；该类中无人评分的排在有评分的之后。上色严格表示这个偏好：更高更绿，更低更红；无人评分用中性色，不染成绿或红。色块不标注数字，也不使用与偏好无关的装饰色。口味标签随卡片返回，不参与排序和上色。三类各自成组返回，不排进同一条混合列表。
 
 强提醒同时读取可见评分与隐藏偏好所依据的同一批分数：可见均分低于阈值，且该菜评分人数达到样本量下限时，给该食堂管理人员写一条站内提示，请其考虑停用。程序不修改 `dish` 的启用状态。界面只写「样本已足够，均分低于当前阈值」，不写倾向、权重或 Elo。
 
@@ -173,7 +173,7 @@ erDiagram
 
 列表、周视图、当餐选定、员工可评列表和评分汇总只返回图片地址或空，不把字节嵌进 JSON。地址指向 `GET /api/dishes/{id}/image`。该接口要求登录，并且调用者要满足下面之一：覆盖该食堂的 `menu.read`、`optimizer.read` 或 `rating.admin_read`；或者持有 `rating.self_write`，且这道餐品属于本人已报、并在评分窗口内的那一餐。其余请求拒绝。
 
-菜谱列表、选菜优化和评分画面在餐品旁显示这张图。没有图片时留空，不放预置图。审计摘要只记图片已上传、已更换或已移除，不写入字节。导出菜谱时带上对应图片文件。
+选菜优化和评分在餐品旁显示这张图。菜谱列表可以显示缩略图，不强制。`image_url` 为空时画面用中性占位，不用另一道菜的图充数。审计摘要只记图片已上传、已更换或已移除，不写入字节。导出菜谱时带上对应图片文件。
 
 ## 7. 关键规则
 
@@ -239,19 +239,20 @@ Magic link 单次有效，15 分钟过期。这个时长是实现参数。待确
 | 管理 | `GET /api/admin/score-summaries` | 评分汇总；按菜、饭、汤分组或筛选；带图片地址或空；不含暗线数值 |
 | 总管理 | `POST /api/admin/recovery` | 密码或账号找回 |
 | 总管理 | `PUT /api/admin/settings/score-alert` | 修改均分阈值与样本量下限 |
+| 总管理 | `GET /api/admin/llm-channels`、`PUT /api/admin/llm-channels` | 维护全站渠道顺序、种类、base URL 和模型名。要 `system.super`。响应只表明 key 是否已配置，不回显原文 |
 | 总管理 | `POST /api/admin/exports` | 数据导出 |
-| 菜谱 | `/api/canteens/{id}/dishes` | 维护菜谱。创建和修改必须带 `kind`，且只能是菜、饭、汤。可附带一张 JPEG、PNG 或 WebP。列表按这三类分组或筛选，并带图片地址或空 |
+| 菜谱 | `/api/canteens/{id}/dishes` | 维护菜谱。创建和修改必须带 `kind`，且只能是菜、饭、汤。可附带 `taste_tags` 和一张 JPEG、PNG 或 WebP。列表按这三类分组或筛选，并带 `image_url` 或 null |
 | 菜谱 | `GET /api/dishes/{id}/image` | 读取图片字节。登录且具备上文的查看条件；否则拒绝 |
 | 菜谱 | `DELETE /api/canteens/{id}/dishes/{dish_id}/image` | 移除图片。要 `menu.write` 且范围覆盖 |
-| 选菜 | `GET /api/canteens/{id}/selection/week?date=` | 周视图。把 `date` 归到北京时间所在周的周一，返回 7 天 × 三餐；每餐的已选按菜、饭、汤分组，并带图片地址或空。不含偏好数字 |
-| 选菜 | `GET /api/canteens/{id}/selection?date=&slot=` | 当餐选定。启用餐品按菜、饭、汤分组，返回组内排序、色阶、是否已选和图片地址或空，不含偏好数字 |
+| 选菜 | `GET /api/canteens/{id}/selection/week?date=` | 周视图。把 `date` 归到北京时间所在周的周一，返回 7 天 × 三餐；每餐的已选按菜、饭、汤分组，并带口味标签和 `image_url` 或 null。色阶为更高更绿、更低更红。不含偏好数字 |
+| 选菜 | `GET /api/canteens/{id}/selection?date=&slot=` | 当餐选定。启用餐品按菜、饭、汤分组，返回组内排序、绿到红色阶、是否已选、口味标签和 `image_url` 或 null，不含偏好数字 |
 | 选菜 | `PUT /api/canteens/{id}/selection/{date}/{slot}` | 立即保存该餐已选餐品。勾选或取消都会调用。跳到下一餐由客户端完成 |
 | 评分 | `GET /api/me/score-targets` | 当餐可评内容，按菜、饭、汤分组，并带图片地址或空 |
 | 评分 | `POST /api/scores` | 分数必填，评语可选 |
 | 通知 | `GET /api/notifications` | 站内提示 |
 | 预留 | `POST /api/push/reservations` | 一期固定返回 `501 push_not_in_phase1`，不投递 |
 
-`POST /api/meal-templates/generate` 的提供者序列为：该账号渠道列表中的本地脚本（若启用）与 LLM 渠道，严格按保存的顺序尝试。OpenAI 旧接口对应 Chat Completions，OpenAI 新接口对应 Responses API，Anthropic 对应 Messages API。DeepSeek、通义和其它 OpenAI 兼容服务使用旧接口形态，由配置者填写 base URL 和模型名。
+`POST /api/meal-templates/generate` 的提供者序列为：全站渠道列表中的本地脚本（若启用）与 LLM 渠道，严格按总管理保存的顺序尝试。OpenAI 旧接口对应 Chat Completions，OpenAI 新接口对应 Responses API，Anthropic 对应 Messages API。DeepSeek、通义和其它 OpenAI 兼容服务使用旧接口形态，由总管理在「LLM 渠道配置」填写 base URL 和模型名。员工不调用渠道维护接口。
 
 ## 9. 安全
 
