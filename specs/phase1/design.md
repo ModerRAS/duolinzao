@@ -79,16 +79,19 @@ config.example.toml
 
 ## 4. 权限
 
-四类身份共用一张账号表。
+一期授权是 Scoped RBAC。权限码是固定集合，角色是这些码的集合。判定只看「账号是否持有该角色分配」以及「分配上的食堂范围是否覆盖目标」。截止时间、评分窗口、不自动下架不参与这层判断。
 
-| 身份 | 来源 | 一期能力 |
-|------|------|----------|
-| 员工 | 邀请码注册后的默认身份 | 绑定多个食堂、报餐、评分、查看并踢本人设备、解绑本人 Passkey |
-| 食堂 / 物业 | 绑定到指定食堂的管理人员 | 维护这些食堂的菜谱，接收这些食堂的强提醒；多账号、多 Passkey |
-| 标签管理员 | 账号上的管理标签 | 发放邀请码、截止后改单、在管理端查看评语 |
-| 总管理 | 配置文件初始化 | 标签管理员的全部能力，加上修改阈值与样本量下限、密码 / 账号找回、数据导出 |
+角色代码：`employee`、`canteen`、`admin`、`super_admin`。总管理与超管都是 `super_admin`。权限码与 `● / —` 矩阵以 [requirements.md](requirements.md) 需求 2 为准，不在这里另定一张。
 
-总管理不通过邀请码注册。同一账号可以同时是员工、某几个食堂的管理人员，并带管理标签。仅有食堂身份时，不能发放邀请码，也不能在截止后改单。
+分配规则：
+
+- `employee` 分配没有食堂管理范围。员工绑定多个食堂写在使用关系里，鉴权时不当成 `canteen` 或 `admin` 的 `canteen_id` 列表。
+- `canteen` 与 `admin` 分配必须带 `canteen_id` 列表。`menu.read`、`menu.write`、`optimizer.read`、`meal.admin_override`、`rating.admin_read`、`comment.admin_read` 只在列表内的食堂生效。
+- `super_admin` 分配的范围是 `*`，并带有 `system.super`。
+- 标签只用来生成或对应一条 `admin` 分配（角色 + 食堂范围）。授权代码不解释标签字符串。
+- 同一账号可以有多条分配。一次操作选用实际命中的那条角色，并把该角色和范围写入审计。
+- `device.approve` 只允许处理本账号的待确认登录，不因 `super_admin` 或食堂范围去批准别人的新设备。
+- `user.invite` 不按食堂拆开。`user.recover`、`audit.read`、`export.run`、`rating.strong_alert_config` 只属于 `super_admin`。
 
 ## 5. 配置文件
 
@@ -113,7 +116,8 @@ config.example.toml
 erDiagram
   ACCOUNT ||--o{ SESSION : keeps
   ACCOUNT ||--o{ PASSKEY : binds
-  ACCOUNT ||--o{ ACCOUNT_TAG : has
+  ACCOUNT ||--o{ ROLE_ASSIGNMENT : has
+  ACCOUNT ||--o{ LOGIN_APPROVAL : requests
   ACCOUNT ||--o{ CANTEEN_STAFF : manages
   ACCOUNT ||--o{ CANTEEN_MEMBER : joins
   CANTEEN ||--o{ DISH : owns
@@ -128,10 +132,11 @@ erDiagram
 主要字段：
 
 - `account`：唯一字符串用户名、可选邮箱、可空密码哈希。邮箱只在使用 magic link 前绑定，注册时不强制。
-- `invite_code`：管理员发放，一次性。
-- `account_tag`：一期使用管理标签 `admin`。
-- `canteen`、`canteen_member`、`canteen_staff`：员工绑定与食堂管理人员分开。
+- `invite_code`：持有 `user.invite` 的账号发放，一次性。
+- `role_assignment`：`account_id`、`role`、`canteen_ids`（`super_admin` 为空并视为 `*`）、可选的来源标签文本。授权不读取标签文本。
+- `canteen`、`canteen_member`、`canteen_staff`：员工绑定与食堂管理人员分开。`canteen_staff` 与 `canteen` 角色分配指向同一批食堂。
 - `passkey`、`totp_credential`、`session`、`device`：Passkey 与会话分离。踢设备只失效会话；解绑 Passkey 只作废对应凭证。
+- `login_approval`：新设备待确认请求。字段包括状态（待确认 / 已允许 / 已拒绝）、User-Agent、能解析出的设备或浏览器名称、IP、创建时间。允许或拒绝后状态不再回到待确认。
 - `shift_plan`：`work2_rest4` 或 `custom`。上二休四保存锚点日。
 - `meal_template`：生成结果或手改预设，内容为日期范围内各餐是否报餐及食堂。
 - `meal_order`：唯一键 `(account_id, meal_date, slot)`。`slot` 仅为 `breakfast | lunch | dinner`。记录 `canteen_id`、来源 `manual | template`、`submitted_at`、`locked_at`。
@@ -142,7 +147,7 @@ erDiagram
 - `preference`：`(account_id, dish_id)` 的隐藏数值，只供服务端计算。
 - `notification`：站内提示。
 - `llm_channel`：属于配置者账号，含顺序、渠道种类、base URL、模型名和加密后的 key。
-- `audit_log`：时间、操作者、动作、对象、不含密钥的摘要。
+- `audit_log`：时间、操作者、当时使用的角色、食堂范围或 `*`、动作、对象、不含密钥的摘要。
 - `app_setting`：可在运行中修改的均分阈值和样本量下限。截止钟点仍以配置文件为准。
 
 隐藏偏好采用该用户对该菜历次明线分数的算术平均，并保存样本数。这个数值只存在于 `preference` 和选菜计算中。选菜排序把明日该餐预计就餐人对同一道候选菜的偏好取平均，平均更高的排在前面；无人评分的菜排在有评分的菜之后，并使用中性颜色。上色按排序位置分成有限色阶，色块不标注数字。
@@ -153,11 +158,13 @@ erDiagram
 
 ### 7.1 登录与新设备
 
-登录页按 Passkey、TOTP、邮箱 magic link、密码排列，密码入口放在最后。
+登录页按 Passkey、TOTP、邮箱 magic link、密码排列，密码入口放在最后。这四种方式都可以直接建立会话。
 
-新设备展示一次性二维码。已登录设备扫码后确认，新设备获得独立会话，旧会话保留。另一条路径是：新设备先用 TOTP 或 magic link 登录，再注册本机 Passkey。
+新设备若要由旧设备授权，则创建 `login_approval`，不走扫码。一期不实现扫码授权。已登录设备打开网页时拉取尚未决定的请求；页面保持打开时继续轮询。轮询间隔是实现参数。确认层是页面内的模态框，至少显示 User-Agent、IP，以及解析得到的设备或浏览器名称。不调用操作系统推送。
 
-Magic link 单次有效，15 分钟过期。二维码授权 2 分钟过期。这两个时长是实现参数。
+任一已登录设备允许后，新设备获得独立会话，旧会话保留，并可以接着绑定本机 Passkey。拒绝后该请求结束，新设备得不到会话。
+
+Magic link 单次有效，15 分钟过期。这个时长是实现参数。待确认请求保持到被允许或拒绝，一期不因为超时把它清掉。
 
 ### 7.2 班制与自动报餐
 
@@ -174,9 +181,9 @@ Magic link 单次有效，15 分钟过期。二维码授权 2 分钟过期。这
 1. 手动写入始终成功覆盖当前未锁定记录，并把来源记为 `manual`。
 2. 模板或自动写入发现来源已是 `manual` 时放弃。
 3. 模板写入遇到模板来源时覆盖。
-4. `locked_at` 已设置时，员工与食堂人员的写入全部拒绝；总管理和管理标签的写入可以修改，并记审计。
+4. `locked_at` 已设置时，没有 `meal.admin_override` 或食堂范围不覆盖的写入全部拒绝；命中的 `admin` 或 `super_admin` 可以修改，并记审计。
 
-每日到配置的 `lock_time`，锁定次日三个餐次的全部已有报餐，并拒绝此后的非管理员写入。三个餐次同一时刻锁定。
+每日到配置的 `lock_time`，锁定次日三个餐次的全部已有报餐，并拒绝此后没有 `meal.admin_override` 的写入。三个餐次同一时刻锁定。
 
 ### 7.4 评分窗口
 
@@ -195,7 +202,9 @@ Magic link 单次有效，15 分钟过期。二维码授权 2 分钟过期。这
 | 登录 | `POST /api/session/totp` | TOTP |
 | 登录 | `POST /api/session/magic-link/request`、`consume` | 邮箱链接 |
 | 登录 | `POST /api/session/password` | 兜底密码 |
-| 设备 | `POST /api/devices/qr/start`、`approve` | 已登录设备扫码授权 |
+| 设备 | `POST /api/login-approvals` | 新设备创建待确认请求 |
+| 设备 | `GET /api/login-approvals/pending` | 已登录设备读取本账号待确认请求 |
+| 设备 | `POST /api/login-approvals/{id}/allow`、`deny` | 页内允许或拒绝；允许后可绑定 Passkey |
 | 设备 | `GET /api/devices`、`DELETE /api/devices/{id}` | 查看与踢设备 |
 | 设备 | `DELETE /api/passkeys/{id}` | 解绑 Passkey |
 | 食堂 | `PUT /api/me/canteens` | 员工绑定多个食堂 |
@@ -221,7 +230,8 @@ Magic link 单次有效，15 分钟过期。二维码授权 2 分钟过期。这
 ## 9. 安全
 
 - Cookie 使用 `HttpOnly`、`Secure`、`SameSite=Lax`。
-- 邀请码、magic link 和二维码授权码只存哈希，单次使用。
+- 邀请码和 magic link 只存哈希，单次使用。
+- 每个会改数据的接口先查权限码和食堂范围，再执行领域规则。
 - 审计摘要禁止写入密码、TOTP 密钥、会话令牌、magic link、邀请码原文和 LLM key。
 - LLM key 使用配置文件中的本地密钥加密后落库，接口只返回渠道是否已配置。
 - 导出文件包含食堂、菜谱、报餐、评分、评语和审计，排除上述密钥材料与密码哈希。
@@ -230,10 +240,10 @@ Magic link 单次有效，15 分钟过期。二维码授权 2 分钟过期。这
 
 ## 10. 测试策略
 
-- Rust 集成测试覆盖：邀请码注册、四种登录的优先级约束、并行会话不被自动踢掉、扫码授权、手动覆盖模板、模板不覆盖手动、截止后员工被拒绝而管理员可改、评分窗口、只写评语被拒绝、重复评分被拒绝、匿名评语响应不含账号、强提醒不改菜品状态、渠道顺序、推送预留返回 501。
+- Rust 集成测试覆盖：邀请码注册、四种登录的优先级约束、并行会话不被自动踢掉、待确认请求在页面打开后仍可允许或拒绝、允许后发会话且可绑 Passkey、拒绝后无会话、确认层含 UA 与 IP、手动覆盖模板、模板不覆盖手动、截止后无 `meal.admin_override` 被拒绝、食堂范围外的改单和菜谱写入被拒绝、评分窗口、只写评语被拒绝、重复评分被拒绝、匿名评语响应不含账号、强提醒不改菜品状态、渠道顺序、推送预留返回 501。
 - 对评分、选菜和强提醒的响应做快照或字段断言，确认没有偏好数值、倾向、权重、Elo。
-- 审计测试写入一条未满 6 个月的日志并确认仍可查询、不可被保留策略删除。
-- Vue 组件测试确认登录入口顺序、员工页没有菜品排行、食堂选菜页有顺序和颜色且没有内部术语。
+- 审计测试写入一条未满 6 个月的日志并确认仍可查询、不可被保留策略删除；日志含操作者、角色和范围。
+- Vue 组件测试确认登录入口顺序、员工页没有菜品排行、食堂选菜页有顺序和颜色且没有内部术语、已打开页面出现允许 / 拒绝确认层、班制页没有上五休二。
 - 一期手工验收使用 Chrome 与 Edge。自动化测试不把 Firefox 或 Safari 列为通过条件。
 
 ## 11. 交付
@@ -244,4 +254,4 @@ Magic link 单次有效，15 分钟过期。二维码授权 2 分钟过期。这
 
 ## 12. 一期不做
 
-支付、短信 OTP、夜宵、上五休二、多班叠加、按食堂发布不同班制、员工端菜品排行、自动下架、评语删除接口、PWA Web Push 的实际投递、微信小程序。
+支付、短信 OTP、夜宵、上五休二、多班叠加、按食堂发布不同班制、员工端菜品排行、自动下架、评语删除接口、PWA Web Push 的实际投递、新设备确认所需的系统推送、扫码授权、以 ACL / ABAC / ReBAC 作为主授权模型、微信小程序，以及根据员工端参考图延伸出的食堂端界面。
