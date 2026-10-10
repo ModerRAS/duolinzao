@@ -92,6 +92,7 @@ config.example.toml
 - 同一账号可以有多条分配。一次操作选用实际命中的那条角色，并把该角色和范围写入审计。
 - `device.approve` 只允许处理本账号的待确认登录，不因 `super_admin` 或食堂范围去批准别人的新设备。
 - `user.invite` 不按食堂拆开。`user.recover`、`audit.read`、`export.run`、`rating.strong_alert_config` 只属于 `super_admin`。
+- `canteen` 在自己的 `canteen_id` 列表内同时拥有 `comment.admin_read` 与 `rating.admin_read`。员工端仍然不展示菜品排行。
 
 ## 5. 配置文件
 
