@@ -4,7 +4,8 @@
 
 - [ ] 1. 建立 crate 与前端工程
 - 建立 Rust crate `duolinzao`（Axum、Tokio、SQLx）和 `web/` 下的 Vue3 + TypeScript + Vite 工程
-- 增加 `config.example.toml`，启动时校验总管理、WebAuthn、SMTP、截止钟点、三餐餐后时刻、均分阈值、样本量下限和本地加密密钥；缺项则拒绝启动
+- 增加 `config.example.toml`，启动时校验总管理、WebAuthn、截止钟点、三餐餐后时刻、均分阈值、样本量下限和本地加密密钥；缺项则拒绝启动
+- 邮箱能力默认可以关闭。关闭时不要求 SMTP，也不强制邮箱验证；开启时才要求 SMTP，并提供 magic link
 - 由配置文件创建总管理，不提供总管理的邀请码注册
 - _需求: 需求 1、需求 2、需求 18
 
@@ -23,8 +24,9 @@
 - _需求: 需求 2、需求 3、需求 7
 
 - [ ] 4. 完成四种登录、新设备页内确认与会话
-- 按 Passkey / WebAuthn、TOTP、邮箱 magic link、密码的顺序提供登录，密码仅作兜底
-- 邮箱在使用 magic link 前绑定，注册不强制邮箱
+- 邮箱能力开启时按 Passkey / WebAuthn、TOTP、邮箱 magic link、密码的顺序提供登录，密码仅作兜底
+- 总管理可在后台关闭 magic link 与邮箱验证。关闭后不出现邮箱登录，注册不要求验证邮箱
+- 邮箱能力开启时，使用 magic link 前再绑定邮箱
 - 新设备创建待确认请求。已登录设备在页面打开时，以及页面保持打开期间，用页内确认层允许或拒绝
 - 确认层展示 User-Agent、IP，以及能解析出的设备或浏览器名称
 - 允许后向新设备发会话，并允许接着绑定本机 Passkey。拒绝后不发会话，并结束该请求
