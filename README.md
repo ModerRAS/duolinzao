@@ -8,4 +8,4 @@
 
 用户故事、技术方案与实施计划见 [specs/phase1/requirements.md](specs/phase1/requirements.md)。
 
-员工端界面参考见 [docs/ui/README.md](docs/ui/README.md)。
+员工端界面参考见 [docs/ui/README.md](docs/ui/README.md)。食堂端横屏画面清单在一期需求第 11 节。
