@@ -274,8 +274,18 @@ When("各食堂为花名册目标日三餐完成选菜勾选", async ({ page }) 
     await expect(col).toBeVisible({ timeout: 15000 });
     const cells = col.locator("button.slot-cell");
     expect(await cells.count()).toBe(3);
+    const slotEns = ["breakfast", "lunch", "dinner"];
     for (let i = 0; i < 3; i += 1) {
+      // 先挂好网络等待再点格子：选定视图 loadPick 是异步的，必须等目标餐
+      // (date, slot) 的数据落定后再点卡。否则撞上旧餐残留——卡片数与“已选
+      // N 道”都是上一个餐的，循环直接跳过、断言照过，当前餐实际没选
+      // （CI 曾静默漏掉整格，T4 才暴露）。
+      const loaded = page.waitForResponse(
+        (r) => r.url().includes(`/selection?date=${target}&slot=${slotEns[i]}`) && r.ok(),
+        { timeout: 15000 },
+      );
       await cells.nth(i).click();
+      await loaded;
       await expect(page.getByText("勾选即保存")).toBeVisible();
       // 等候选卡片加载（本食堂 4 道：2 菜 1 饭 1 汤），再全选。
       await expect(page.locator(".dish-card")).toHaveCount(4, { timeout: 15000 });
