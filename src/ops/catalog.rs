@@ -1167,7 +1167,7 @@ pub async fn comments(
     let rows = sqlx::query(
         r#"
         SELECT c.id, c.body, c.anonymous, s.meal_date, s.slot, d.name AS dish_name, d.kind,
-               a.username
+               a.username, a.display_name
         FROM comment c
         JOIN score s ON s.id = c.score_id
         JOIN dish d ON d.id = s.dish_id
@@ -1197,6 +1197,11 @@ pub async fn comments(
                 "dish_name": row.get::<String, _>("dish_name"),
                 "kind": kind,
                 "username": if anonymous { Value::Null } else { json!(row.get::<String, _>("username")) },
+                "display_name": if anonymous {
+                    Value::Null
+                } else {
+                    json!(row.get::<Option<String>, _>("display_name"))
+                },
             }),
         );
     }

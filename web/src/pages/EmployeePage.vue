@@ -28,6 +28,7 @@ import {
   SLOT_NAME,
   SLOT_SHORT,
   SLOTS,
+  personName,
   weekdayLabel,
   weekStart,
   type Canteen,
@@ -36,11 +37,12 @@ import {
   type Slot,
 } from "../api";
 import Thumb from "../components/Thumb.vue";
+import AccountPage from "./AccountPage.vue";
 import { auth } from "../session";
 import { appVersion, loadVersion } from "../version";
 
 type Tab = "meal" | "score" | "mine";
-type Screen = "home" | "shift" | "week" | "generate" | "preview" | "mine" | "bind" | "devices" | "notices";
+type Screen = "home" | "shift" | "week" | "generate" | "preview" | "mine" | "bind" | "devices" | "notices" | "account";
 
 interface Shift {
   kind: string | null;
@@ -156,6 +158,7 @@ const title = computed(() => {
   if (screen.value === "bind") return "绑定食堂";
   if (screen.value === "devices") return "设备与 Passkey";
   if (screen.value === "notices") return "站内提示";
+  if (screen.value === "account") return "账户设置";
   if (tab.value === "mine") return "我的";
   if (screen.value === "home") return "首页";
   return "报餐";
@@ -572,7 +575,7 @@ onMounted(() => {
       <template v-if="tab === 'meal' && screen === 'home'">
         <div class="hello">
           <strong>多邻灶</strong>
-          <p>{{ greeting() }}，{{ auth.me?.username }}</p>
+          <p>{{ greeting() }}，{{ personName(auth.me) }}</p>
         </div>
         <p v-if="!shiftLabel" class="hint">尚未选择班制，默认不报任何一餐。</p>
         <section v-if="homeNext" class="next-card">
@@ -781,12 +784,14 @@ onMounted(() => {
 
       <template v-else-if="screen === 'mine'">
         <van-cell-group inset>
+          <van-cell title="显示名" :value="personName(auth.me)" />
           <van-cell title="账号" :value="auth.me?.username" />
+          <van-cell title="账户设置" is-link @click="screen = 'account'" />
           <van-cell title="绑定食堂" is-link @click="screen = 'bind'" />
           <van-cell title="设备与 Passkey" is-link @click="screen = 'devices'" />
           <van-cell title="站内提示" is-link :value="unread ? `${unread} 条未读` : ''" @click="screen = 'notices'" />
         </van-cell-group>
-        <p class="hint">绑定食堂只决定报餐可用范围，不是食堂管理范围。退出登录请到设备页踢掉本机。</p>
+        <p class="hint">绑定食堂只决定报餐可用范围，不是食堂管理范围。</p>
       </template>
 
       <template v-else-if="screen === 'bind'">
@@ -828,6 +833,10 @@ onMounted(() => {
           <span>{{ item.friendly_name || "Passkey" }}</span>
           <van-button size="small" type="danger" plain @click="unbind(item.id)">解绑</van-button>
         </article>
+      </template>
+
+      <template v-else-if="screen === 'account'">
+        <AccountPage embedded @open-devices="screen = 'devices'" />
       </template>
 
       <template v-else-if="screen === 'notices'">

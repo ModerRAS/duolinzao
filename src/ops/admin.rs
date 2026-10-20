@@ -268,7 +268,7 @@ pub async fn list_invites(state: &AppState, user: &CurrentUser) -> Result<Value,
     let rows = sqlx::query(
         r#"
         SELECT i.id, i.created_at, i.used_at, i.max_uses, i.used_count, i.revoked_at,
-               a.username AS used_by
+               a.username AS used_by, a.display_name AS used_by_display_name
         FROM invite_code i
         LEFT JOIN account a ON a.id = i.used_by
         ORDER BY i.created_at DESC
@@ -282,6 +282,7 @@ pub async fn list_invites(state: &AppState, user: &CurrentUser) -> Result<Value,
             "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
             "used_at": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("used_at"),
             "used_by": row.get::<Option<String>, _>("used_by"),
+            "used_by_display_name": row.get::<Option<String>, _>("used_by_display_name"),
             "max_uses": row.get::<i32, _>("max_uses"),
             "used_count": row.get::<i32, _>("used_count"),
             "revoked_at": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("revoked_at"),
@@ -562,7 +563,7 @@ pub async fn list_accounts(state: &AppState, user: &CurrentUser) -> Result<Value
     }
     let rows = sqlx::query(
         r#"
-        SELECT a.id, a.username, a.email,
+        SELECT a.id, a.username, a.display_name, a.email,
                a.password_hash IS NOT NULL AS has_password,
                (SELECT COUNT(*) FROM passkey p WHERE p.account_id = a.id AND p.revoked_at IS NULL) AS passkey_count,
                EXISTS(SELECT 1 FROM totp_credential t WHERE t.account_id = a.id AND t.confirmed) AS totp
@@ -576,6 +577,7 @@ pub async fn list_accounts(state: &AppState, user: &CurrentUser) -> Result<Value
         "items": rows.iter().map(|row| json!({
             "id": row.get::<Uuid, _>("id"),
             "username": row.get::<String, _>("username"),
+            "display_name": row.get::<Option<String>, _>("display_name"),
             "email": row.get::<Option<String>, _>("email"),
             "has_password": row.get::<bool, _>("has_password"),
             "passkey_count": row.get::<i64, _>("passkey_count"),

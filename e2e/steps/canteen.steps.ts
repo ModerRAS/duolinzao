@@ -547,3 +547,26 @@ Then("不能按食堂范围批准他人设备", async () => {
   const r = await c.call(`/api/login-approvals/${id}/allow`, { method: "POST" });
   expect(r.status).toBe(403);
 });
+
+// 场景：横屏侧栏进入账户设置
+When("从左侧栏打开账户设置", async ({ page }) => {
+  await ensureCanteen(page);
+  await openSide(page, "账户");
+  await expect(page.getByRole("heading", { name: "账户设置" })).toBeVisible();
+});
+
+Then("账户设置展示只读账号、显示名、Passkey、验证器、邮箱、改密、退出和设备入口", async ({ page }) => {
+  const account = page.getByPlaceholder("账号", { exact: true });
+  await expect(account).toBeDisabled();
+  await expect(account).toHaveValue(canteenUser);
+  await expect(page.getByPlaceholder("显示名，留空则界面使用账号")).toBeVisible();
+  await expect(page.getByRole("button", { name: "绑定 Passkey" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "设置验证器", exact: true })).toBeVisible();
+  await expect(
+    page.getByText("邮箱能力已关闭，不能在这里绑定或修改邮箱。").or(page.getByRole("button", { name: "保存邮箱" })),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "更新密码" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "退出登录" })).toBeVisible();
+  await page.getByRole("button", { name: "设备与 Passkey" }).click();
+  await expect(page.getByText("只管理本账号设备；不能按食堂批准他人的新设备")).toBeVisible();
+});

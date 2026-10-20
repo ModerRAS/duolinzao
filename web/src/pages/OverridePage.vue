@@ -2,12 +2,13 @@
 import { ref, watch } from "vue";
 import { Lock } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
-import { api, shanghaiToday, SLOT_NAME, type Slot } from "../api";
+import { api, personName, shanghaiToday, SLOT_NAME, type Slot } from "../api";
 import { auth } from "../session";
 
 interface Row {
   account_id: string;
   username: string;
+  display_name: string | null;
   date: string;
   slot: Slot;
   canteen_id: string | null;
@@ -51,7 +52,12 @@ watch(() => [auth.canteenId, date.value], load, { immediate: true });
     </div>
     <div class="card">
       <el-table :data="rows">
-        <el-table-column prop="username" label="账号" />
+        <el-table-column label="账号">
+          <template #default="{ row }">
+            <div>{{ personName(row) }}</div>
+            <div v-if="row.display_name && row.display_name !== row.username" class="muted">{{ row.username }}</div>
+          </template>
+        </el-table-column>
         <el-table-column label="餐次" width="100">
           <template #default="{ row }">{{ SLOT_NAME[row.slot as Slot] }}</template>
         </el-table-column>

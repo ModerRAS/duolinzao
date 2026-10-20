@@ -11,7 +11,9 @@ import {
   ensureLoggedIn,
   ensureSelection,
   lastDenial,
+  loginAs,
   openTab,
+  password,
   rootSession,
   shanghaiToday,
 } from "./helpers";
@@ -484,4 +486,99 @@ Then("新设备不能因此登录", async () => {
   await ctxC?.close();
   await ctxD?.close();
   ctxB = pageB = ctxC = pageC = ctxD = pageD = null as any;
+});
+
+// 场景：账户设置改显示名、绑定 Passkey、改密并退出
+let accountCtx: BrowserContext | null = null;
+let accountPage: Page | null = null;
+const nextPassword = "E2e-acct-pass2!";
+
+When("从「我的」进入账户设置并修改显示名", async ({ page }) => {
+  await openTab(page, "我的");
+  await page.getByText("账户设置", { exact: true }).click();
+  await expect(page.getByRole("heading", { name: "账户设置" })).toBeVisible();
+  const account = page.getByPlaceholder("账号", { exact: true });
+  await expect(account).toBeDisabled();
+  await page.getByPlaceholder("显示名，留空则界面使用账号").fill("灶友甲");
+  const saved = page.waitForResponse((r) => r.url().includes("/api/me/display-name") && r.ok());
+  await page.getByRole("button", { name: "保存显示名" }).click();
+  await saved;
+  await expect(page.getByText("显示名已保存")).toBeVisible();
+});
+
+Then("界面优先展示显示名且账号保持只读", async ({ page }) => {
+  await expect(page.getByText("当前展示：灶友甲")).toBeVisible();
+  const me = await page.request.get("/api/me").then((r) => r.json());
+  expect(me.display_name).toBe("灶友甲");
+  expect(me.username).not.toBe("灶友甲");
+  await expect(page.getByPlaceholder("账号", { exact: true })).toHaveValue(me.username);
+  await openTab(page, "报餐");
+  await expect(page.getByText("灶友甲")).toBeVisible();
+});
+
+When("在账户设置绑定 Passkey 并自助修改密码", async ({ page }) => {
+  const me = await page.request.get("/api/me").then((r) => r.json());
+  const browser = page.context().browser();
+  expect(browser).toBeTruthy();
+  accountCtx = await browser!.newContext({ baseURL });
+  accountPage = await accountCtx.newPage();
+  await loginAs(accountPage, me.username, password);
+  await expect(accountPage.locator(".emp")).toBeVisible({ timeout: 15000 });
+
+  await openTab(page, "我的");
+  await page.getByText("账户设置", { exact: true }).click();
+  await enableVirtualAuth(page);
+  await page.getByPlaceholder("Passkey 名称，例如办公室电脑").fill("账户钥匙");
+  await page.getByRole("button", { name: "绑定 Passkey" }).click();
+  await expect(page.getByText("账户钥匙")).toBeVisible({ timeout: 15000 });
+  await page.getByRole("button", { name: "设置验证器" }).click();
+  await expect(page.getByText("密钥", { exact: true })).toBeVisible();
+  await page.getByPlaceholder("当前密码").fill(password);
+  await page.getByPlaceholder("新密码，至少 8 位").fill(nextPassword);
+  await page.getByPlaceholder("再输入一次新密码").fill(nextPassword);
+  const changed = page.waitForResponse((r) => r.url().includes("/api/me/password") && r.ok());
+  await page.getByRole("button", { name: "更新密码" }).click();
+  await changed;
+  await expect(page.getByText(/密码已更新/).last()).toBeVisible();
+});
+
+Then("当前会话仍有效且其它会话结束", async ({ page }) => {
+  expect((await page.request.get("/api/me")).status()).toBe(200);
+  await expect(async () => {
+    expect((await accountPage!.request.get("/api/me")).status()).toBe(401);
+  }).toPass({ timeout: 15000 });
+});
+
+When("把密码改回并退出登录", async ({ page }) => {
+  await page.getByPlaceholder("当前密码").fill(nextPassword);
+  await page.getByPlaceholder("新密码，至少 8 位").fill(password);
+  await page.getByPlaceholder("再输入一次新密码").fill(password);
+  const restored = page.waitForResponse((r) => r.url().includes("/api/me/password") && r.ok());
+  await page.getByRole("button", { name: "更新密码" }).click();
+  await restored;
+  await expect(page.getByText(/密码已更新/).last()).toBeVisible();
+  const keys = page.locator(".account .row");
+  while ((await keys.count()) > 0) {
+    const before = await keys.count();
+    const removed = page.waitForResponse(
+      (r) => r.url().includes("/api/passkeys/") && r.request().method() === "DELETE" && r.ok(),
+    );
+    await keys.first().getByRole("button", { name: "解绑" }).click();
+    await page.getByRole("button", { name: "确定" }).click();
+    await removed;
+    await expect(keys).toHaveCount(before - 1);
+  }
+  await page.getByPlaceholder("显示名，留空则界面使用账号").fill("");
+  const cleared = page.waitForResponse((r) => r.url().includes("/api/me/display-name") && r.ok());
+  await page.getByRole("button", { name: "保存显示名" }).click();
+  await cleared;
+  await page.getByRole("button", { name: "退出登录" }).click();
+  await page.getByRole("button", { name: "确定" }).click();
+});
+
+Then("回到登录页", async ({ page }) => {
+  await expect(page.getByRole("button", { name: /密码登录（兜底）/ })).toBeVisible();
+  await accountCtx?.close();
+  accountCtx = null;
+  accountPage = null;
 });

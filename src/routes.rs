@@ -4,12 +4,12 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use tower_http::set_header::SetResponseHeaderLayer;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::NaiveDate;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -72,6 +72,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/devices", get(devices))
         .route("/api/devices/:id", axum::routing::delete(device_delete))
         .route("/api/me", get(me))
+        .route("/api/me/display-name", put(put_display_name))
+        .route("/api/me/password", post(change_password))
         .route("/api/me/email", put(bind_email))
         .route("/api/me/totp/setup", post(totp_setup))
         .route("/api/me/totp/confirm", post(totp_confirm))
@@ -463,6 +465,45 @@ async fn device_delete(
 
 async fn me(State(state): State<AppState>, user: CurrentUser) -> Result<Json<Value>, AppError> {
     Ok(Json(session::me(&state, &user).await?))
+}
+
+#[derive(Deserialize)]
+struct DisplayNameBody {
+    display_name: String,
+}
+
+async fn put_display_name(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Json(body): Json<DisplayNameBody>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        session::update_display_name(&state, &user, &body.display_name).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct PasswordChangeBody {
+    current_password: String,
+    new_password: String,
+}
+
+async fn change_password(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    ip: ClientIp,
+    Json(body): Json<PasswordChangeBody>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        session::change_password(
+            &state,
+            &user,
+            &body.current_password,
+            &body.new_password,
+            &ip.0,
+        )
+        .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1204,7 +1245,9 @@ async fn get_test_clock(
 ) -> Result<Json<Value>, AppError> {
     test_clock_allowed()?;
     crate::rbac::authorize(&user.assignments, crate::rbac::Perm::SystemSuper, None)?;
-    Ok(Json(json!({ "now": state.test_clock.get(), "overridden": state.test_clock.get().is_some() })))
+    Ok(Json(
+        json!({ "now": state.test_clock.get(), "overridden": state.test_clock.get().is_some() }),
+    ))
 }
 
 #[derive(Deserialize)]

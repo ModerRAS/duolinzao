@@ -279,15 +279,15 @@ async fn prepare() -> Api {
     }
     drop(admin);
 
-    let pool = PgPoolOptions::new()
-        .max_connections(8)
-        // 默认本机 peer 套接字；CI 的 runner 里没有套接字，用 TEST_DATABASE_URL 走 TCP。
-        .connect(
-            &std::env::var("TEST_DATABASE_URL")
-                .unwrap_or_else(|_| "postgres:///duolinzao_test?host=/var/run/postgresql".to_string()),
-        )
-        .await
-        .unwrap();
+    let pool =
+        PgPoolOptions::new()
+            .max_connections(8)
+            // 默认本机 peer 套接字；CI 的 runner 里没有套接字，用 TEST_DATABASE_URL 走 TCP。
+            .connect(&std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+                "postgres:///duolinzao_test?host=/var/run/postgresql".to_string()
+            }))
+            .await
+            .unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
     sqlx::query(
         r#"
@@ -1099,12 +1099,14 @@ async fn phase1_acceptance() {
     assert_groups(&comments["groups"], "评语");
     let texts = comments["groups"]["菜"].as_array().unwrap();
     let anon = texts.iter().find(|item| item["anonymous"] == true).unwrap();
-    assert!(anon["username"].is_null());
+    assert!(anon.get("username").unwrap().is_null());
+    assert!(anon.get("display_name").unwrap().is_null());
     let named = texts
         .iter()
         .find(|item| item["anonymous"] == false)
         .unwrap();
     assert_eq!(named["username"], "emp-b");
+    assert!(named.get("display_name").unwrap().is_null());
     must(
         api.call(
             "GET",
@@ -2119,7 +2121,8 @@ async fn csrf_gate_and_security_headers() {
         .uri("/api/register")
         .header("content-type", "application/json")
         .body(Body::from(
-            serde_json::to_vec(&json!({"username": "x", "invite_code": "y", "password": "z"})).unwrap(),
+            serde_json::to_vec(&json!({"username": "x", "invite_code": "y", "password": "z"}))
+                .unwrap(),
         ))
         .unwrap();
     let response = api.app.clone().oneshot(bare).await.expect("oneshot");
@@ -2139,7 +2142,12 @@ async fn csrf_gate_and_security_headers() {
             None,
         )
         .await;
-    assert_ne!(res.status, StatusCode::FORBIDDEN, "带头不应被 CSRF 闸拦: {}", res.json());
+    assert_ne!(
+        res.status,
+        StatusCode::FORBIDDEN,
+        "带头不应被 CSRF 闸拦: {}",
+        res.json()
+    );
 
     // 读操作不受影响；响应应带安全头。
     let bare = Request::builder()
@@ -2151,7 +2159,9 @@ async fn csrf_gate_and_security_headers() {
     assert_eq!(response.status(), StatusCode::OK);
     let headers = response.headers();
     assert_eq!(
-        headers.get("x-content-type-options").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
         Some("nosniff")
     );
     let csp = headers
@@ -2260,7 +2270,11 @@ async fn security_hardening_round2() {
         StatusCode::OK,
         "logout",
     );
-    let set_cookie = logged.cookie.clone().unwrap_or_default().to_ascii_lowercase();
+    let set_cookie = logged
+        .cookie
+        .clone()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     assert!(
         set_cookie.contains("max-age=0") || set_cookie.contains("expires="),
         "logout 应清 cookie: {set_cookie}"
@@ -2342,14 +2356,29 @@ async fn security_hardening_round2() {
         if ok {
             must(res, StatusCode::OK, &format!("base_url 允许 {base_url}"));
         } else {
-            let res = must(res, StatusCode::BAD_REQUEST, &format!("base_url 拒绝 {base_url}"));
-            assert_eq!(res.json()["error"], "channel_base_url_invalid", "{base_url}");
+            let res = must(
+                res,
+                StatusCode::BAD_REQUEST,
+                &format!("base_url 拒绝 {base_url}"),
+            );
+            assert_eq!(
+                res.json()["error"],
+                "channel_base_url_invalid",
+                "{base_url}"
+            );
         }
     }
     // base_url 变更写审计：最近一条 llm_channels 应带 base_url。
     let audits = must(
-        api.call("GET", "/api/admin/audit", Some(&super_token), None, None, None)
-            .await,
+        api.call(
+            "GET",
+            "/api/admin/audit",
+            Some(&super_token),
+            None,
+            None,
+            None,
+        )
+        .await,
         StatusCode::OK,
         "audit",
     )
@@ -2605,4 +2634,543 @@ async fn invite_multi_use() {
         row["revoked_at"].is_string(),
         "作废后列表应标 revoked_at: {row}"
     );
+}
+
+#[tokio::test]
+async fn account_settings() {
+    let _gate = GATE.lock().await;
+    let api = prepare().await;
+    let super_token = must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "root", "password": "root-password-1"})),
+            Some("acct-root"),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "super login",
+    )
+    .token();
+    let (token_a, _) = register_user(&api, &super_token, "acct-a").await;
+    let token_b = must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "acct-a", "password": "password-1"})),
+            Some("acct-a-other"),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "second session",
+    )
+    .token();
+    assert_ne!(token_a, token_b);
+
+    let me = must(
+        api.call("GET", "/api/me", Some(&token_a), None, None, None)
+            .await,
+        StatusCode::OK,
+        "me before rename",
+    )
+    .json();
+    assert_eq!(me["username"], "acct-a");
+    assert!(me.get("display_name").unwrap().is_null());
+    assert_eq!(me["email_verified"], false);
+    assert_eq!(me["totp"], false);
+
+    must(
+        api.call(
+            "PUT",
+            "/api/me/display-name",
+            None,
+            Some(json!({"display_name": "外人"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+        "rename requires session",
+    );
+    let renamed = must(
+        api.call(
+            "PUT",
+            "/api/me/display-name",
+            Some(&token_a),
+            Some(json!({"display_name": "  灶上的人  "})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "rename",
+    )
+    .json();
+    assert_eq!(renamed["display_name"], "灶上的人");
+    let me = must(
+        api.call("GET", "/api/me", Some(&token_a), None, None, None)
+            .await,
+        StatusCode::OK,
+        "me after rename",
+    )
+    .json();
+    assert_eq!(me["display_name"], "灶上的人");
+    assert_eq!(me["username"], "acct-a");
+    let cleared = must(
+        api.call(
+            "PUT",
+            "/api/me/display-name",
+            Some(&token_a),
+            Some(json!({"display_name": "   "})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "clear display name",
+    )
+    .json();
+    assert!(cleared["display_name"].is_null());
+    must(
+        api.call(
+            "PUT",
+            "/api/me/display-name",
+            Some(&token_a),
+            Some(json!({"display_name": "名".repeat(65)})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "display name too long",
+    );
+    must(
+        api.call(
+            "PUT",
+            "/api/me/display-name",
+            Some(&token_a),
+            Some(json!({"display_name": "灶上的人"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "rename again",
+    );
+    let started = must(
+        api.call(
+            "POST",
+            "/api/passkeys/register/start",
+            Some(&token_a),
+            None,
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "passkey start uses display name",
+    )
+    .json();
+    let started_text = started.to_string();
+    assert!(
+        started_text.contains("灶上的人"),
+        "Passkey 展示名应使用显示名: {started_text}"
+    );
+    assert!(
+        started_text.contains("acct-a"),
+        "Passkey 登录名仍是账号: {started_text}"
+    );
+
+    let accounts = must(
+        api.call(
+            "GET",
+            "/api/admin/accounts",
+            Some(&super_token),
+            None,
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "accounts",
+    )
+    .json();
+    assert!(!accounts.to_string().contains("password_hash"));
+    let acct = accounts["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["username"] == "acct-a")
+        .unwrap();
+    assert_eq!(acct["display_name"], "灶上的人");
+
+    let wrong = must(
+        api.call(
+            "POST",
+            "/api/me/password",
+            Some(&token_a),
+            Some(json!({"current_password": "nope-xxxx", "new_password": "password-2"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "wrong current password",
+    );
+    assert_eq!(wrong.json()["error"], "password_incorrect");
+    must(
+        api.call("GET", "/api/me", Some(&token_b), None, None, None)
+            .await,
+        StatusCode::OK,
+        "wrong password does not revoke",
+    );
+    let weak = must(
+        api.call(
+            "POST",
+            "/api/me/password",
+            Some(&token_a),
+            Some(json!({"current_password": "password-1", "new_password": "short"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "weak new password",
+    );
+    assert_eq!(weak.json()["error"], "password_weak");
+    let same = must(
+        api.call(
+            "POST",
+            "/api/me/password",
+            Some(&token_a),
+            Some(json!({"current_password": "password-1", "new_password": "password-1"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "same password",
+    );
+    assert_eq!(same.json()["error"], "password_unchanged");
+    let changed = must(
+        api.call(
+            "POST",
+            "/api/me/password",
+            Some(&token_a),
+            Some(json!({"current_password": "password-1", "new_password": "password-2"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "change password",
+    );
+    assert!(changed.cookie.is_none(), "自助改密不轮换当前 cookie");
+    assert!(changed.json()["revoked_other_sessions"].as_u64().unwrap() >= 1);
+    must(
+        api.call("GET", "/api/me", Some(&token_a), None, None, None)
+            .await,
+        StatusCode::OK,
+        "current session kept",
+    );
+    must(
+        api.call("GET", "/api/me", Some(&token_b), None, None, None)
+            .await,
+        StatusCode::UNAUTHORIZED,
+        "other session revoked",
+    );
+    let devices = must(
+        api.call("GET", "/api/devices", Some(&token_a), None, None, None)
+            .await,
+        StatusCode::OK,
+        "devices remain",
+    )
+    .json();
+    let device_rows = devices["devices"].as_array().unwrap();
+    assert!(
+        device_rows.len() >= 2,
+        "改密按会话吊销，不删设备: {devices}"
+    );
+    assert_eq!(
+        device_rows
+            .iter()
+            .filter(|item| item["session_active"] == true)
+            .count(),
+        1
+    );
+    must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "acct-a", "password": "password-1"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "old password rejected",
+    );
+    let token_c = must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "acct-a", "password": "password-2"})),
+            Some("acct-a-new"),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "login with new password",
+    )
+    .token();
+    must(
+        api.call("GET", "/api/me", Some(&token_a), None, None, None)
+            .await,
+        StatusCode::OK,
+        "original session still valid after a new login",
+    );
+
+    must(
+        api.call(
+            "PUT",
+            "/api/admin/settings/email",
+            Some(&super_token),
+            Some(json!({"enabled": true})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "enable email",
+    );
+    must(
+        api.call(
+            "PUT",
+            "/api/me/email",
+            Some(&token_a),
+            Some(json!({"email": "acct-a@example.com"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "bind email",
+    );
+    let me = must(
+        api.call("GET", "/api/me", Some(&token_a), None, None, None)
+            .await,
+        StatusCode::OK,
+        "email bound",
+    )
+    .json();
+    assert_eq!(me["email"], "acct-a@example.com");
+    assert_eq!(me["email_verified"], false);
+    must(
+        api.call(
+            "POST",
+            "/api/session/magic-link/request",
+            None,
+            Some(json!({"username": "acct-a"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "magic before password change",
+    );
+    let mail = api.mailer.messages.lock().unwrap().clone();
+    let token = mail
+        .last()
+        .unwrap()
+        .2
+        .split("token=")
+        .nth(1)
+        .unwrap()
+        .split('\n')
+        .next()
+        .unwrap()
+        .to_string();
+    must(
+        api.call(
+            "POST",
+            "/api/me/password",
+            Some(&token_a),
+            Some(json!({"current_password": "password-2", "new_password": "password-3"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "change password again",
+    );
+    must(
+        api.call(
+            "POST",
+            "/api/session/magic-link/consume",
+            None,
+            Some(json!({"token": token})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "unused magic link consumed by password change",
+    );
+    must(
+        api.call("GET", "/api/me", Some(&token_a), None, None, None)
+            .await,
+        StatusCode::OK,
+        "keeper session after second change",
+    );
+    must(
+        api.call("GET", "/api/me", Some(&token_c), None, None, None)
+            .await,
+        StatusCode::UNAUTHORIZED,
+        "session from previous password revoked",
+    );
+
+    let setup = must(
+        api.call(
+            "POST",
+            "/api/me/totp/setup",
+            Some(&token_a),
+            None,
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "totp setup",
+    )
+    .json();
+    let secret = totp_rs::Secret::Encoded(setup["secret"].as_str().unwrap().to_string())
+        .to_bytes()
+        .unwrap();
+    let totp = totp_rs::TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        secret,
+        Some("多邻灶".into()),
+        "acct-a".into(),
+    )
+    .unwrap();
+    let now = Utc
+        .with_ymd_and_hms(2026, 10, 10, 2, 0, 0)
+        .unwrap()
+        .timestamp() as u64;
+    must(
+        api.call(
+            "POST",
+            "/api/me/totp/confirm",
+            Some(&token_a),
+            Some(json!({"code": totp.generate(now)})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "totp confirm",
+    );
+    let me = must(
+        api.call("GET", "/api/me", Some(&token_a), None, None, None)
+            .await,
+        StatusCode::OK,
+        "totp flag",
+    )
+    .json();
+    assert_eq!(me["totp"], true);
+
+    let logged = must(
+        api.call(
+            "POST",
+            "/api/session/logout",
+            Some(&token_a),
+            None,
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "logout",
+    );
+    let set_cookie = logged
+        .cookie
+        .clone()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(
+        set_cookie.contains("max-age=0") || set_cookie.contains("expires="),
+        "logout clears cookie: {set_cookie}"
+    );
+    must(
+        api.call("GET", "/api/me", Some(&token_a), None, None, None)
+            .await,
+        StatusCode::UNAUTHORIZED,
+        "logged out",
+    );
+
+    let token_d = must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "acct-a", "password": "password-3"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "login after self change",
+    )
+    .token();
+    must(
+        api.call(
+            "POST",
+            "/api/admin/recovery",
+            Some(&super_token),
+            Some(
+                json!({"username": "acct-a", "action": "reset_password", "password": "password-4"}),
+            ),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "super recovery still revokes every session",
+    );
+    must(
+        api.call("GET", "/api/me", Some(&token_d), None, None, None)
+            .await,
+        StatusCode::UNAUTHORIZED,
+        "recovery revokes the current session too",
+    );
+
+    let audit = must(
+        api.call(
+            "GET",
+            "/api/admin/audit",
+            Some(&super_token),
+            None,
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "audit",
+    )
+    .json();
+    let audit_text = audit.to_string();
+    assert!(audit_text.contains("display_name_update"));
+    assert!(audit_text.contains("password_change"));
+    assert!(!audit_text.contains("password-2"));
+    assert!(!audit_text.contains("password-3"));
+    assert!(!audit_text.contains("password_hash"));
 }

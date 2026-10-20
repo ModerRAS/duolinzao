@@ -2,7 +2,8 @@
 import { computed, onMounted, ref } from "vue";
 import { Bell } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
-import { api, explain } from "./api";
+import { api, explain, personName } from "./api";
+import AccountPage from "./pages/AccountPage.vue";
 import AlertPage from "./pages/AlertPage.vue";
 import AuditPage from "./pages/AuditPage.vue";
 import CommentsPage from "./pages/CommentsPage.vue";
@@ -41,6 +42,7 @@ type Page =
   | "threshold"
   | "recover"
   | "llm"
+  | "account"
   | "employee";
 
 interface Note {
@@ -96,6 +98,7 @@ const nav = computed(() =>
     { group: "总管 / 超管", key: "threshold" as Page, label: "阈值", icon: "Operation", show: can("rating.strong_alert_config") },
     { group: "总管 / 超管", key: "recover" as Page, label: "找回", icon: "Key", show: can("user.recover") },
     { group: "总管 / 超管", key: "llm" as Page, label: "LLM", icon: "Cpu", show: can("system.super") },
+    { group: "其它", key: "account" as Page, label: "账户", icon: "Setting", show: true },
     { group: "其它", key: "employee" as Page, label: "员工竖屏", icon: "Iphone", show: hasLandscape.value && (can("meal.self_read") || can("shift.self_write")) },
   ].filter((item) => item.show),
 );
@@ -108,7 +111,7 @@ const groups = computed(() => {
 });
 
 function firstPage(): Page {
-  return nav.value.find((item) => item.key !== "employee")?.key ?? "employee";
+  return nav.value.find((item) => item.key !== "employee" && item.key !== "account")?.key ?? "employee";
 }
 
 function open(key: Page) {
@@ -219,7 +222,9 @@ onMounted(async () => {
         <el-badge :value="unread" :hidden="unread === 0">
           <el-button circle @click="notesOpen = true"><el-icon><Bell /></el-icon></el-button>
         </el-badge>
-        <span class="who">{{ auth.me?.username }}</span>
+        <button type="button" class="who" :title="auth.me?.username" @click="open('account')">
+          {{ personName(auth.me) }}
+        </button>
       </div>
       <p v-if="needsCanteen && canteens.length === 0" class="muted">当前没有可管理的食堂。</p>
       <OverviewPage v-if="page === 'overview'" />
@@ -238,6 +243,7 @@ onMounted(async () => {
       <ThresholdPage v-else-if="page === 'threshold'" />
       <RecoverPage v-else-if="page === 'recover'" />
       <LlmPage v-else-if="page === 'llm'" />
+      <AccountPage v-else-if="page === 'account'" @open-devices="page = 'device'" />
       <div v-else class="phone-wrap">
         <div class="phone"><EmployeePage /></div>
       </div>
@@ -278,7 +284,10 @@ onMounted(async () => {
 .toolbar, .canteen-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .toolbar { margin-bottom: 14px; }
 .spacer { flex: 1; }
-.who { color: #6b7280; font-size: 13px; }
+.who {
+  border: none; background: transparent; cursor: pointer; font: inherit;
+  color: #6b7280; font-size: 13px; padding: 4px 2px;
+}
 .phone-wrap { display: flex; justify-content: center; }
 .phone {
   width: 390px; height: min(844px, calc(100vh - 120px)); background: #fff; border-radius: 28px;

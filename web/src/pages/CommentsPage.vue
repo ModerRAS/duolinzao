@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { api, KINDS, SLOT_NAME, type Kind, type Slot } from "../api";
+import { api, KINDS, personName, SLOT_NAME, type Kind, type Slot } from "../api";
 import { auth } from "../session";
 
 interface CommentRow {
@@ -12,6 +12,7 @@ interface CommentRow {
   dish_name: string;
   kind: Kind;
   username: string | null;
+  display_name: string | null;
 }
 
 const tab = ref<Kind>("菜");
@@ -43,7 +44,7 @@ watch(() => auth.canteenId, load, { immediate: true });
           <span class="muted">{{ item.meal_date }} {{ SLOT_NAME[item.slot] }}</span>
         </div>
         <p>{{ item.body }}</p>
-        <div class="muted">{{ item.anonymous ? "匿名" : item.username }}</div>
+        <div class="muted">{{ item.anonymous ? "匿名" : personName(item) }}</div>
       </article>
       <p v-if="groups[tab].length === 0" class="muted">这一类还没有评语</p>
     </div>

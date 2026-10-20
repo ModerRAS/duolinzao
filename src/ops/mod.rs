@@ -271,3 +271,42 @@ pub fn ensure_username(username: &str) -> Result<String, AppError> {
     }
     Ok(username)
 }
+
+/// 空字符串清空显示名。非空则去掉首尾空白，最长 64 个字符，拒绝控制字符。
+pub fn normalize_display_name(raw: &str) -> Result<Option<String>, AppError> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if name.chars().count() > 64 || name.chars().any(char::is_control) {
+        return Err(AppError::bad(
+            "display_name_invalid",
+            "显示名需要是不超过 64 个字符、不含控制字符的文本",
+        ));
+    }
+    Ok(Some(name.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_display_name;
+
+    #[test]
+    fn display_name_trims_and_rejects_controls() {
+        assert_eq!(normalize_display_name("  ").unwrap(), None);
+        assert_eq!(
+            normalize_display_name("  灶上的人  ").unwrap().as_deref(),
+            Some("灶上的人")
+        );
+        assert!(normalize_display_name("a\nb").is_err());
+        assert!(normalize_display_name(&"名".repeat(65)).is_err());
+        assert_eq!(
+            normalize_display_name(&"名".repeat(64))
+                .unwrap()
+                .unwrap()
+                .chars()
+                .count(),
+            64
+        );
+    }
+}

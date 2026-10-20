@@ -6,8 +6,8 @@ use webauthn_rs::prelude::{Passkey, PublicKeyCredential, RegisterPublicKeyCreden
 
 use super::{
     audit, audit_user, check_login_rate, email_enabled, ensure_password, ensure_username,
-    issue_session, login_body, record_login, too_many_failures, IssuedSession, MAGIC_LINK_MINUTES,
-    PASSKEY_CHALLENGE_MINUTES,
+    issue_session, login_body, normalize_display_name, record_login, too_many_failures,
+    IssuedSession, MAGIC_LINK_MINUTES, PASSKEY_CHALLENGE_MINUTES,
 };
 use crate::crypto::{
     decrypt, encrypt, hash_password, random_bytes, random_token, sha256_hex, verify_password,
@@ -266,10 +266,20 @@ pub async fn login_password(
 }
 
 pub async fn me(state: &AppState, user: &CurrentUser) -> Result<Value, AppError> {
-    let email: Option<String> = sqlx::query_scalar("SELECT email FROM account WHERE id = $1")
-        .bind(user.account_id)
-        .fetch_one(&state.pool)
-        .await?;
+    let row = sqlx::query(
+        r#"
+        SELECT a.email, a.email_verified, a.display_name,
+               EXISTS(
+                   SELECT 1 FROM totp_credential t
+                   WHERE t.account_id = a.id AND t.confirmed
+               ) AS totp
+        FROM account a
+        WHERE a.id = $1
+        "#,
+    )
+    .bind(user.account_id)
+    .fetch_one(&state.pool)
+    .await?;
     let roles = user
         .assignments
         .iter()
@@ -284,10 +294,127 @@ pub async fn me(state: &AppState, user: &CurrentUser) -> Result<Value, AppError>
     Ok(json!({
         "id": user.account_id,
         "username": user.username,
-        "email": email,
+        "display_name": row.get::<Option<String>, _>("display_name"),
+        "email": row.get::<Option<String>, _>("email"),
+        "email_verified": row.get::<bool, _>("email_verified"),
+        "totp": row.get::<bool, _>("totp"),
         "roles": roles,
         "permissions": crate::rbac::permission_codes(&user.assignments),
         "email_enabled": email_enabled(state).await?,
+    }))
+}
+
+pub async fn update_display_name(
+    state: &AppState,
+    user: &CurrentUser,
+    raw: &str,
+) -> Result<Value, AppError> {
+    let display_name = normalize_display_name(raw)?;
+    let hit = authorize(&user.assignments, Perm::DeviceApprove, None)?;
+    let now = state.clock.now();
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("UPDATE account SET display_name = $1 WHERE id = $2")
+        .bind(&display_name)
+        .bind(user.account_id)
+        .execute(&mut *tx)
+        .await?;
+    crate::audit::write_audit(
+        &mut *tx,
+        crate::audit::AuditEntry {
+            at: now,
+            actor_id: Some(user.account_id),
+            actor_username: Some(user.username.clone()),
+            role: Some(hit.role.clone()),
+            scope: hit.scope.clone(),
+            action: "display_name_update".into(),
+            object_type: Some("account".into()),
+            object_id: Some(user.account_id.to_string()),
+            summary: json!({"display_name": display_name}),
+            result: "ok".into(),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(json!({"display_name": display_name}))
+}
+
+/// 自助改密：校验当前密码，保留当前会话，吊销该账号其它会话，并作废未消费的 magic link。
+/// 总管找回仍走 `revoke_all_sessions`，连当前会话一起吊销。
+pub async fn change_password(
+    state: &AppState,
+    user: &CurrentUser,
+    current_password: &str,
+    new_password: &str,
+    ip: &str,
+) -> Result<Value, AppError> {
+    let hit = authorize(&user.assignments, Perm::DeviceApprove, None)?;
+    let now = state.clock.now();
+    check_login_rate(&state.pool, &user.username, ip, now).await?;
+    let mut tx = state.pool.begin().await?;
+    let row = sqlx::query("SELECT password_hash FROM account WHERE id = $1 FOR UPDATE")
+        .bind(user.account_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let Some(hash) = row.get::<Option<String>, _>("password_hash") else {
+        return Err(AppError::bad(
+            "password_missing",
+            "这个账号还没有密码，请联系总管找回",
+        ));
+    };
+    if !verify_password(current_password, &hash) {
+        drop(tx);
+        record_login(&state.pool, &user.username, ip, false, now).await?;
+        return Err(AppError::bad("password_incorrect", "当前密码不正确"));
+    }
+    if current_password == new_password {
+        return Err(AppError::bad("password_unchanged", "新密码与当前密码相同"));
+    }
+    ensure_password(new_password)?;
+    let new_hash = hash_password(new_password)?;
+    sqlx::query("UPDATE account SET password_hash = $1 WHERE id = $2")
+        .bind(new_hash)
+        .bind(user.account_id)
+        .execute(&mut *tx)
+        .await?;
+    let revoked = sqlx::query(
+        r#"
+        UPDATE session SET revoked_at = $1
+        WHERE account_id = $2 AND id <> $3 AND revoked_at IS NULL
+        "#,
+    )
+    .bind(now)
+    .bind(user.account_id)
+    .bind(user.session_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    sqlx::query(
+        "UPDATE magic_link SET consumed_at = $1 WHERE account_id = $2 AND consumed_at IS NULL",
+    )
+    .bind(now)
+    .bind(user.account_id)
+    .execute(&mut *tx)
+    .await?;
+    crate::audit::write_audit(
+        &mut *tx,
+        crate::audit::AuditEntry {
+            at: now,
+            actor_id: Some(user.account_id),
+            actor_username: Some(user.username.clone()),
+            role: Some(hit.role),
+            scope: hit.scope,
+            action: "password_change".into(),
+            object_type: Some("account".into()),
+            object_id: Some(user.account_id.to_string()),
+            summary: json!({"revoked_other_sessions": revoked}),
+            result: "ok".into(),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(json!({
+        "changed": true,
+        "revoked_other_sessions": revoked,
     }))
 }
 
@@ -564,14 +691,17 @@ pub async fn passkey_register_start(
     user: &CurrentUser,
 ) -> Result<Value, AppError> {
     let exclude = passkey_ids(state, user.account_id).await?;
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT display_name FROM account WHERE id = $1")
+            .bind(user.account_id)
+            .fetch_one(&state.pool)
+            .await?;
+    let label = stored
+        .filter(|item| !item.trim().is_empty())
+        .unwrap_or_else(|| user.username.clone());
     let (challenge, reg_state) = state
         .webauthn
-        .start_passkey_registration(
-            user.account_id,
-            &user.username,
-            &user.username,
-            Some(exclude),
-        )
+        .start_passkey_registration(user.account_id, &user.username, &label, Some(exclude))
         .map_err(|err| {
             tracing::warn!(error = ?err, "passkey start");
             AppError::bad("passkey_failed", "无法开始绑定 Passkey")
@@ -738,9 +868,11 @@ pub async fn passkey_auth_finish(
     let fail = async |username: &str, ip: &str| {
         let _ = record_login(&state.pool, username, ip, false, state.clock.now()).await;
     };
-    let stored = state.challenges.take(challenge_id, now).await.ok_or_else(|| {
-        AppError::bad("passkey_failed", "登录已过期")
-    });
+    let stored = state
+        .challenges
+        .take(challenge_id, now)
+        .await
+        .ok_or_else(|| AppError::bad("passkey_failed", "登录已过期"));
     let stored = match stored {
         Ok(item) => item,
         Err(err) => {
@@ -1176,7 +1308,8 @@ pub fn session_payload(issued: &IssuedSession, username: &str, account_id: Uuid)
     body
 }
 
-/// 登出：只吊销当前会话（改密/找回走 admin::recover 吊销全部会话）。
+/// 登出：只吊销当前会话。
+/// 自助改密保留当前会话并吊销其它会话；总管找回走 `revoke_all_sessions`，吊销全部会话。
 pub async fn logout(state: &AppState, user: &CurrentUser) -> Result<Value, AppError> {
     sqlx::query("UPDATE session SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL")
         .bind(state.clock.now())
@@ -1186,23 +1319,23 @@ pub async fn logout(state: &AppState, user: &CurrentUser) -> Result<Value, AppEr
     Ok(json!({"revoked": true}))
 }
 
-/// 改密/找回后吊销该账号全部会话，并作废未消费的 magic link。
+/// 总管找回后吊销该账号全部会话（含当前），并作废未消费的 magic link。
 pub async fn revoke_all_sessions(
     pool: &sqlx::PgPool,
     account_id: Uuid,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), AppError> {
+    sqlx::query("UPDATE session SET revoked_at = $1 WHERE account_id = $2 AND revoked_at IS NULL")
+        .bind(now)
+        .bind(account_id)
+        .execute(pool)
+        .await?;
     sqlx::query(
-        "UPDATE session SET revoked_at = $1 WHERE account_id = $2 AND revoked_at IS NULL",
+        "UPDATE magic_link SET consumed_at = $1 WHERE account_id = $2 AND consumed_at IS NULL",
     )
     .bind(now)
     .bind(account_id)
     .execute(pool)
     .await?;
-    sqlx::query("UPDATE magic_link SET consumed_at = $1 WHERE account_id = $2 AND consumed_at IS NULL")
-        .bind(now)
-        .bind(account_id)
-        .execute(pool)
-        .await?;
     Ok(())
 }

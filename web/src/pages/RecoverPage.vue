@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { api, explain } from "../api";
+import { api, explain, personName } from "../api";
 
 interface Account {
   id: string;
   username: string;
+  display_name: string | null;
   email: string | null;
   has_password: boolean;
   passkey_count: number;
@@ -18,9 +19,12 @@ const dialog = ref(false);
 const target = ref("");
 const password = ref("");
 
-const filtered = computed(() =>
-  rows.value.filter((item) => item.username.includes(query.value.trim())),
-);
+const filtered = computed(() => {
+  const queryText = query.value.trim();
+  return rows.value.filter(
+    (item) => item.username.includes(queryText) || (item.display_name ?? "").includes(queryText),
+  );
+});
 
 async function load() {
   const body = await api<{ items: Account[] }>("/api/admin/accounts");
@@ -75,6 +79,9 @@ onMounted(load);
     <el-input v-model="query" placeholder="按账号查找" style="max-width: 280px; margin-bottom: 12px" />
     <div class="card">
       <el-table :data="filtered">
+        <el-table-column label="显示名" min-width="120">
+          <template #default="{ row }">{{ personName(row) }}</template>
+        </el-table-column>
         <el-table-column prop="username" label="账号" />
         <el-table-column label="邮箱" min-width="160">
           <template #default="{ row }">{{ row.email || "—" }}</template>

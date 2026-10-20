@@ -449,7 +449,7 @@ pub async fn admin_list_meals(
     let _ = hit;
     let rows = sqlx::query(
         r#"
-        SELECT o.account_id, a.username, o.meal_date, o.slot, o.canteen_id, o.ordering, o.locked_at
+        SELECT o.account_id, a.username, a.display_name, o.meal_date, o.slot, o.canteen_id, o.ordering, o.locked_at
         FROM meal_order o
         JOIN account a ON a.id = o.account_id
         WHERE o.meal_date = $1 AND o.canteen_id = $2
@@ -466,6 +466,7 @@ pub async fn admin_list_meals(
         "items": rows.iter().map(|row| json!({
             "account_id": row.get::<Uuid, _>("account_id"),
             "username": row.get::<String, _>("username"),
+            "display_name": row.get::<Option<String>, _>("display_name"),
             "date": row.get::<NaiveDate, _>("meal_date"),
             "slot": row.get::<String, _>("slot"),
             "canteen_id": row.get::<Option<Uuid>, _>("canteen_id"),

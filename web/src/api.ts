@@ -68,10 +68,21 @@ export interface Groups<T> {
 export interface Me {
   id: string;
   username: string;
+  display_name: string | null;
   email: string | null;
+  email_verified: boolean;
+  totp: boolean;
   roles: { role: string; canteen_ids: string[]; source_label: string | null }[];
   permissions: string[];
   email_enabled: boolean;
+}
+
+export function personName(
+  me: { display_name?: string | null; username?: string | null } | null | undefined,
+): string {
+  const custom = me?.display_name?.trim();
+  if (custom) return custom;
+  return me?.username?.trim() ?? "";
 }
 
 export interface Canteen {

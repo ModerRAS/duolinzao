@@ -21,6 +21,7 @@
 ## Architecture notes（一期）
 
 - 鉴权：Passkey → TOTP → 邮箱 magic link → 密码兜底；无短信 OTP。邮箱相关能力（magic link / 验证）可由超管在后台关闭，做成类似 Gitea / Vaultwarden 的可选项，不强制验证邮箱
+- 账户：`username` 只读；`display_name` 可改，界面优先显示名。自助改密校验当前密码，保留当前会话并吊销其它会话。超管找回仍吊销该账号全部会话。Passkey 可后绑，TOTP / 绑邮箱 / 退出在账户设置页。不新增权限码
 - 新设备：已登录设备页内批准（可挂起；展示 UA/IP）；不依赖系统推送；扫码非主路径
 - 授权：**Scoped RBAC**（`employee` / `canteen` / `admin` / `super_admin` + 食堂范围）；标签映射为 admin 任职，不是另一套引擎
 - 班制：仅「上二休四」+「自定义」；**统一 DSL**（预设=写好的 DSL；用户轻度改餐次后存个人 DSL；按 DSL 生成每日报餐；套用前预览，绿=报餐 / 橙=不报，可点切换）

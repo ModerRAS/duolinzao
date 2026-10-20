@@ -100,6 +100,7 @@ UI 参考：[docs/ui](../ui/README.md)
       ├─ 评分
       └─ 我的
            ├─ 我的食堂（查看 / 修改绑定）
+           ├─ 账户设置（显示名、只读账号、Passkey、TOTP、邮箱、自助改密、退出）
            ├─ 设备与 Passkey（绑定 / 解绑 Passkey、设备列表）
            ├─ 新设备确认（批准 / 拒绝其他设备登录）
            ├─ 站内通知
@@ -111,7 +112,7 @@ UI 参考：[docs/ui](../ui/README.md)
 
 1. **登录**：与 Web 同步（Passkey / 认证器 TOTP / 邮箱 OTP / 密码）；默认 Passkey（Credential Manager）；无可用凭据 / 无凭据提供方或 GMS / 取消 / 失败时自动回退密码（§3.2 / §3.2.4）
 2. **邀请注册**：注册成功即登录，随后直接绑定 Passkey（§3.2.3）
-2a. **账户设置**：与 Web 同步（绑定邮箱 `/api/me/email`、TOTP 设置 `/api/me/totp/*` 等）
+2a. **账户设置**：与 Web 同步。`username` 只读；显示名 `PUT /api/me/display-name`（`GET /api/me` 带 `display_name`，界面优先显示名）；绑定邮箱 `/api/me/email`；TOTP `/api/me/totp/setup|confirm`；Passkey 注册 `/api/passkeys/register/start|finish` 与解绑；自助改密 `POST /api/me/password`（校验当前密码，保留当前会话，吊销其它会话）；退出 `POST /api/session/logout`。总管找回仍吊销全部会话，不在此页
 3. **设备与 Passkey**：App 内绑定、解绑 Passkey；设备列表与移除（`/api/devices*`）
 4. **新设备确认**：新设备登录走确认流程；App 内可批准 / 拒绝其他设备的登录请求（`/api/login-approvals*`）
 5. **首页 / 本周报餐**：`/api/me/home`、`/api/me/meals`，切换报 / 不报（`PUT /api/meals/{date}/{slot}`）
@@ -248,7 +249,7 @@ Web 与 App 共用同一流程与同一服务端改动：
 | 通知 | GET / POST | `/api/notifications`、`/api/notifications/:id/read` | |
 | 注册 | POST | `/api/register` | 成功即登录，见 §3.2.3 |
 | 登录方式 | GET / POST | `/api/session/methods`（含 `email_otp`）、`/api/session/totp`、`/api/session/email-otp/request`、`/api/session/email-otp/verify`（**取代** magic-link） | 与 Web 同步；§3.2.4 / §4.5 |
-| 账户设置 | PUT / POST | `/api/me/email`、`/api/me/totp/setup`、`/api/me/totp/confirm` | 与 Web 同步 |
+| 账户设置 | GET / PUT / POST | `/api/me`（含 `display_name`）、`/api/me/display-name`、`/api/me/email`、`/api/me/totp/setup`、`/api/me/totp/confirm`、`/api/me/password`、`/api/passkeys/register/start`、`/api/passkeys/register/finish`、`/api/session/logout` | 与 Web 同步。自助改密保留当前会话并吊销其它会话 |
 | 设备 | GET / DELETE | `/api/devices`、`/api/devices/:id` | |
 | 新设备确认 | POST / GET | `/api/login-approvals*` | 见 §3.2.1 |
 
@@ -449,3 +450,4 @@ docs/clients/
 | 2026-10-15 | 修订：邮箱 OTP 与切换期残留 magic token 均为用后即废（无更长双轨窗口）；email-otp/request 一律返回 accepted，仅存在且已绑邮箱才发信 |
 | 2026-10-15 | 修订：一次性实现为记录已用 TOTP 时间窗（同窗拒绝），非仅依赖算法 |
 | 2026-10-15 | 修订：明确一次性=持久化已用 TOTP 时间窗（step/timestamp），同窗 verify 拒绝；邮箱 OTP 有效期仍 10 分钟；magic link consume-on-use；request 一律 accepted |
+| 2026-10-20 | 修订：账户设置清单与现 Web 对齐：显示名、只读账号、Passkey 后绑、TOTP、邮箱、自助改密（保留当前会话并吊销其它会话）、退出。总管找回仍吊销全部会话 |

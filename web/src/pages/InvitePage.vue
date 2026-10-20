@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { api } from "../api";
+import { api, personName } from "../api";
 
 interface Invite {
   id: string;
   created_at: string;
   used_at: string | null;
   used_by: string | null;
+  used_by_display_name: string | null;
   max_uses: number;
   used_count: number;
   revoked_at: string | null;
@@ -17,6 +18,13 @@ const rows = ref<Invite[]>([]);
 const shown = ref<string | null>(null);
 const dialog = ref(false);
 const maxUses = ref(1);
+
+function usedLabel(row: Invite): string {
+  if (!row.used_by) return "";
+  const shown = personName({ display_name: row.used_by_display_name, username: row.used_by });
+  if (shown !== row.used_by) return ` · ${shown}（${row.used_by}）`;
+  return ` · ${row.used_by}`;
+}
 
 function statusOf(row: Invite): { text: string; color: string } {
   if (row.revoked_at) return { text: "已作废", color: "#6b7280" };
@@ -108,7 +116,7 @@ onMounted(load);
         </el-table-column>
         <el-table-column label="状态" width="180">
           <template #default="{ row }">
-            <span :style="{ color: statusOf(row as Invite).color }">{{ statusOf(row as Invite).text }}{{ (row as Invite).used_by ? ` · ${(row as Invite).used_by}` : "" }}</span>
+            <span :style="{ color: statusOf(row as Invite).color }">{{ statusOf(row as Invite).text }}{{ usedLabel(row as Invite) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="190">
