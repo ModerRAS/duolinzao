@@ -176,7 +176,7 @@ class NetworkRepository(private val api: ApiClient) : DlRepository {
     override suspend fun myCanteens(): List<Canteen> =
         parse<CanteenList>(api.get("/api/me/canteens")).items
     override suspend fun allCanteens(): List<Canteen> =
-        try { parse<List<Canteen>>(api.get("/api/canteens")) } catch (_: Exception) { myCanteens() }
+        parse<CanteenList>(api.get("/api/canteens")).items
     override suspend fun bindCanteens(ids: List<String>) {
         api.put("/api/me/canteens", buildJsonObject {
             put("canteen_ids", buildJsonArray { ids.forEach { add(it) } })
