@@ -1,0 +1,20 @@
+#!/bin/sh
+# 最小 gradlew：优先系统 gradle，其次 Gradle 用户家目录里已缓存的 8.10.2，最后下载。
+# 不提交 gradle-wrapper.jar，用本脚本代替（仓库不收二进制）。
+set -e
+DIST_VER="8.10.2"
+CACHE_BIN=""
+for d in "$HOME/.gradle/wrapper/dists/gradle-$DIST_VER-bin"/*/gradle-$DIST_VER/bin/gradle; do
+  [ -x "$d" ] && CACHE_BIN="$d" && break
+done
+if command -v gradle >/dev/null 2>&1; then
+  exec gradle "$@"
+elif [ -n "$CACHE_BIN" ]; then
+  exec "$CACHE_BIN" "$@"
+else
+  echo "downloading gradle $DIST_VER ..." >&2
+  TMP="$(mktemp -d)"
+  curl -L --fail -o "$TMP/gradle.zip" "https://services.gradle.org/distributions/gradle-$DIST_VER-bin.zip"
+  unzip -q "$TMP/gradle.zip" -d "$TMP"
+  exec "$TMP/gradle-$DIST_VER/bin/gradle" "$@"
+fi

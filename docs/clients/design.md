@@ -452,3 +452,4 @@ docs/clients/
 | 2026-10-15 | 修订：明确一次性=持久化已用 TOTP 时间窗（step/timestamp），同窗 verify 拒绝；邮箱 OTP 有效期仍 10 分钟；magic link consume-on-use；request 一律 accepted |
 | 2026-10-20 | 修订：账户设置清单与现 Web 对齐：显示名、只读账号、Passkey 后绑、TOTP、邮箱、自助改密（保留当前会话并吊销其它会话）、退出。总管找回仍吊销全部会话 |
 | 2026-10-20 | 修订：已实现注册即登录与 email-otp（服务端 `POST /api/register` 直接下发会话；`email-otp/request|verify` 取代 magic-link；`methods` 返回 `email_otp`；认证器 TOTP 同窗重放拒绝） |
+| 2026-10-20 | 修订：Android 员工端初版实现（`clients/android/`，mock 可离线演示 + 真机验证；对接服务端 email-otp/注册即登录） |
