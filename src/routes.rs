@@ -56,6 +56,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/session/logout", post(logout))
         .route("/api/session/email-otp/request", post(email_otp_request))
         .route("/api/session/email-otp/verify", post(email_otp_verify))
+        // 站点自托管 `/app/`：通用 APK 与 version.json。显式路由优先于文末的
+        // SPA fallback，缺文件时返回 404 JSON（不回退 index.html，见设计 §4.4）。
+        .route("/app/*path", get(serve_app_file))
         .route("/api/session/passkey/start", post(passkey_start))
         .route("/api/session/passkey/finish", post(passkey_finish))
         .route("/api/passkeys/register/start", post(passkey_register_start))
@@ -205,6 +208,54 @@ async fn health() -> Json<Value> {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// 站点自托管 `/app/`（通用 APK 与 version.json，供应用内更新同源拉取）。
+/// 文件来自 `{static_dir}/app/`；缺文件、未配目录或路径逃逸一律 404 JSON，
+/// 绝不回退 index.html（否则 App 会把 HTML 当 version.json 解析失败）。
+async fn serve_app_file(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> impl IntoResponse {
+    let not_found = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "not_found", "message": "不存在"})),
+        )
+            .into_response()
+    };
+    let Some(dir) = state.config.static_dir.clone() else {
+        return not_found();
+    };
+    if path.contains("..") || path.contains('\\') || path.starts_with('/') {
+        return not_found();
+    }
+    let full = format!("{dir}/app/{path}");
+    let bytes = match tokio::fs::read(&full).await {
+        Ok(item) => item,
+        Err(_) => return not_found(),
+    };
+    let content_type = if full.ends_with(".apk") {
+        "application/vnd.android.package-archive"
+    } else if full.ends_with(".json") {
+        "application/json"
+    } else {
+        "application/octet-stream"
+    };
+    // version.json 不缓存；APK 可缓存一小时（文件名随版本走 version.json 的 url）。
+    let cache = if full.ends_with("version.json") {
+        "no-store"
+    } else {
+        "public, max-age=3600"
+    };
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, cache),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 async fn methods(State(state): State<AppState>) -> Result<Json<Value>, AppError> {

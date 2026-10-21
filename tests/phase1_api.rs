@@ -309,7 +309,22 @@ async fn prepare() -> Api {
     let image_dir = std::env::temp_dir().join("duolinzao-phase1-images");
     let _ = std::fs::remove_dir_all(&image_dir);
     std::fs::create_dir_all(&image_dir).unwrap();
-    let raw = example_config().replace("/tmp/duolinzao-images", image_dir.to_str().unwrap());
+    // 站点自托管 `/app/` 夹具：version.json + 假 APK，供应用内更新分发测试。
+    let app_dir = std::env::temp_dir().join("duolinzao-phase1-app");
+    let _ = std::fs::remove_dir_all(&app_dir);
+    std::fs::create_dir_all(app_dir.join("app")).unwrap();
+    std::fs::write(
+        app_dir.join("app/version.json"),
+        r#"{"versionCode":1,"versionName":"0.1.2","url":"/app/duolinzao.apk","sha256":"abc"}"#,
+    )
+    .unwrap();
+    std::fs::write(app_dir.join("app/duolinzao.apk"), b"fakepk").unwrap();
+    let raw = example_config()
+        .replace("/tmp/duolinzao-images", image_dir.to_str().unwrap())
+        .replace(
+            "[server]",
+            &format!("[server]\nstatic_dir = \"{}\"", app_dir.to_str().unwrap()),
+        );
     let config = AppConfig::parse(&raw).unwrap();
     let mailer = Arc::new(CapturingMailer::new());
     let scripts = ScriptedBackend::failing_then_script();
@@ -2305,6 +2320,75 @@ async fn csrf_gate_and_security_headers() {
         headers.get("referrer-policy").is_some(),
         "缺少 Referrer-Policy"
     );
+}
+
+#[tokio::test]
+async fn app_static_no_spa_fallback() {
+    let _gate = GATE.lock().await;
+    let api = prepare().await;
+
+    async fn raw(api: &Api, uri: &str) -> (StatusCode, Value, Vec<(String, String)>, Vec<u8>) {
+        let request = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("user-agent", "phase1-test")
+            .body(Body::empty())
+            .unwrap();
+        let response = api.app.clone().oneshot(request).await.expect("oneshot");
+        let status = response.status();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    value.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, body, headers, bytes.to_vec())
+    }
+    let header = |headers: &[(String, String)], name: &str| {
+        headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    };
+
+    // version.json：200 + JSON 体 + JSON 类型 + 不缓存。
+    let (status, body, headers, _) = raw(&api, "/app/version.json").await;
+    assert_eq!(status, StatusCode::OK, "version.json 应直出");
+    assert_eq!(body["versionCode"], 1, "{body}");
+    assert_eq!(body["url"], "/app/duolinzao.apk", "{body}");
+    assert_eq!(header(&headers, "content-type"), "application/json", "{headers:?}");
+    assert_eq!(header(&headers, "cache-control"), "no-store", "{headers:?}");
+
+    // APK：200 + Android 包类型。
+    let (status, _, headers, bytes) = raw(&api, "/app/duolinzao.apk").await;
+    assert_eq!(status, StatusCode::OK, "apk 应直出");
+    assert_eq!(bytes, b"fakepk", "应为夹具包内容");
+    assert_eq!(
+        header(&headers, "content-type"),
+        "application/vnd.android.package-archive",
+        "{headers:?}"
+    );
+
+    // 缺文件：404 JSON（error=not_found），绝不能回退 index.html。
+    let (status, body, headers, bytes) = raw(&api, "/app/missing.apk").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "缺文件应 404");
+    assert_eq!(body["error"], "not_found", "{body}");
+    assert_eq!(header(&headers, "content-type"), "application/json", "{headers:?}");
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains("<html"),
+        "不能回退 SPA 页面"
+    );
+
+    // 路径逃逸：同样 404。
+    let (status, _, _, _) = raw(&api, "/app/../secret").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "逃逸应 404");
 }
 
 #[tokio::test]
