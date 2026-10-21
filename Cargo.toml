@@ -1,6 +1,6 @@
 [package]
 name = "duolinzao"
-version = "0.1.6"
+version = "0.1.5"
 edition = "2021"
 license = "AGPL-3.0-only"
 rust-version = "1.88"

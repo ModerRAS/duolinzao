@@ -239,12 +239,7 @@ keytool -genkeypair -keystore site.jks -storepass '<强随机密码>' -keypass '
 ```
 
 2. 用超管账号登录站点 → 「应用签名」页 → 选择 jks 文件、填三个值 → 「保存到数据库」。
-   也可以跳过这步：空库时直接点「签名发布」，服务端会自动生成一把 release 级 RSA
-   keystore 存进数据库再签名（`keytool -genkeypair`，密码为服务端随机串）；之后仍可随时在
-   同页覆盖成自己的 key（覆盖前页面会警告换 key 后果）。
    页面只回显别名与 keystore 指纹（sha256），密码永不回显、不进审计、不出现在任何列表响应。
-   应用 API 不提供 keystore 导出/下载（防泄漏）；备份靠数据库（`app_signing` 行密文随库备份），
-   恢复数据库即还原签名能力。
 3. 点「签名发布」：服务端用库里 keystore 给当前镜像里的包签名（`apksigner`，镜像自带），
    重算 sha256 并写出正式 `version.json`（`"signing":"release"`）。
 4. 验证：`curl -fsS https://example.com/app/version.json | jq .`

@@ -16,7 +16,6 @@ interface SignResult {
   url: string;
   sha256: string;
   signing: string;
-  keystore_generated?: boolean;
 }
 
 const status = ref<SigningStatus>({ configured: false });
@@ -28,7 +27,6 @@ const alias = ref("");
 const keyPass = ref("");
 const uploading = ref(false);
 const signing = ref(false);
-const generating = ref(false);
 const lastSign = ref<SignResult | null>(null);
 
 async function load() {
@@ -56,18 +54,6 @@ async function upload() {
     ElMessage.warning("keystore 密码、别名、key 密码都要填。");
     return;
   }
-  // 已配置时覆盖=换 key：已装设备应用内更新失败，只能卸载重装，先二次确认。
-  if (status.value.configured) {
-    try {
-      await ElMessageBox.confirm(
-        "已配置 keystore。覆盖上传后，已安装旧包的设备应用内更新会失败，只能卸载重装。继续覆盖？",
-        "覆盖 keystore",
-        { type: "warning", confirmButtonText: "覆盖", cancelButtonText: "取消" },
-      );
-    } catch {
-      return;
-    }
-  }
   uploading.value = true;
   try {
     const form = new FormData();
@@ -90,40 +76,23 @@ async function upload() {
 }
 
 async function sign() {
-  // 空库时点「签名发布」即自动生成一把入库再签；已配置则直接用库里的签。
-  const tip = status.value.configured
-    ? "用数据库里的 keystore 给当前版本签名并发布？每次部署新镜像后都要点一次。"
-    : "数据库里还没有 keystore。将自动生成一把 release 级 keystore 存进数据库，再用它签名并发布（之后仍可在同页覆盖成自己的 key）。继续？";
   try {
-    await ElMessageBox.confirm(tip, "签名发布", {
-      type: "warning",
-      confirmButtonText: "签名并发布",
-      cancelButtonText: "取消",
-    });
+    await ElMessageBox.confirm(
+      "用数据库里的 keystore 给当前版本签名并发布？每次部署新镜像后都要点一次。",
+      "签名发布",
+      { type: "warning", confirmButtonText: "签名并发布", cancelButtonText: "取消" },
+    );
   } catch {
     return;
   }
   signing.value = true;
   try {
     lastSign.value = await api<SignResult>("/api/admin/app-signing/sign", { method: "POST" });
-    await load();
     ElMessage.success(`已发布正式包（versionCode=${lastSign.value.versionCode}）。`);
   } catch (error) {
     ElMessage.error(explain(error));
   } finally {
     signing.value = false;
-  }
-}
-
-async function generate() {
-  generating.value = true;
-  try {
-    status.value = await api<SigningStatus>("/api/admin/app-signing/generate", { method: "POST" });
-    ElMessage.success("已自动生成 keystore 并存进数据库，可点「签名发布」。");
-  } catch (error) {
-    ElMessage.error(explain(error));
-  } finally {
-    generating.value = false;
   }
 }
 
@@ -137,7 +106,7 @@ onMounted(load);
       <div class="row">
         <div>
           <strong>签名状态</strong>
-          <p class="muted">{{ ready && status.configured ? `已配置（别名 ${status.key_alias}）` : "未配置：可点「签名发布」自动生成一把存进数据库，或自行上传 .jks。" }}</p>
+          <p class="muted">{{ ready && status.configured ? `已配置（别名 ${status.key_alias}）` : "未配置：/app/* 现在是 CI 未签包，App 装上也提示更新失败。" }}</p>
         </div>
         <el-tag v-if="ready" :type="status.configured ? 'success' : 'warning'">{{ status.configured ? "已配置" : "未配置" }}</el-tag>
       </div>
@@ -149,7 +118,7 @@ onMounted(load);
       <el-alert type="info" show-icon :closable="false" title="每次部署新镜像后要点一次「签名发布」，否则 /app/* 还是未签包。" />
     </div>
     <div class="card box">
-      <strong>上传 / 覆盖 keystore（随时可换成自己的）</strong>
+      <strong>上传 / 替换 keystore（超管一次性操作）</strong>
       <el-upload drag :auto-upload="false" :show-file-list="false" :on-change="onFile" accept=".jks,.keystore">
         <div class="up-hint">{{ fileName || "拖入 keystore 文件（.jks）" }}<br /><span>只进数据库，不进 git、不出内网</span></div>
       </el-upload>
@@ -166,21 +135,17 @@ onMounted(load);
         <el-button type="primary" :loading="uploading" @click="upload">保存到数据库</el-button>
       </el-form>
     </div>
-    <div class="card box">
+    <div v-if="status.configured" class="card box">
       <div class="row">
         <div>
           <strong>签名发布</strong>
-          <p class="muted">空库时先自动生成一把 keystore 入库再签；已有则直接用库里的签，重算 sha256 并写出 version.json。</p>
+          <p class="muted">用库里 keystore 给当前镜像里的包签名，重算 sha256 并写出 version.json。</p>
         </div>
-        <div class="actions">
-          <el-button v-if="ready && !status.configured" :loading="generating" @click="generate">生成 keystore</el-button>
-          <el-button type="success" :loading="signing" @click="sign">签名并发布</el-button>
-        </div>
+        <el-button type="success" :loading="signing" @click="sign">签名并发布</el-button>
       </div>
       <div v-if="lastSign" class="meta">
         <span>versionCode：{{ lastSign.versionCode }}（{{ lastSign.versionName }}）</span>
         <span class="mono">sha256：{{ lastSign.sha256 }}</span>
-        <span v-if="lastSign.keystore_generated">本次已自动生成 keystore 并存进数据库（别名 {{ status.key_alias }}）。</span>
       </div>
     </div>
   </div>
@@ -192,5 +157,4 @@ onMounted(load);
 .meta { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #555; }
 .mono { word-break: break-all; font-family: monospace; }
 .up-hint { padding: 12px; }
-.actions { display: flex; gap: 8px; align-items: center; }
 </style>

@@ -137,10 +137,8 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/llm-channels",
             get(get_channels).put(put_channels),
         )
-        // 应用签名：keystore 只活在数据库（空库可自动生成），由超管上传覆盖；正式签名在服务端完成。
-        // 注意：绝不加导出/下载路由（keystore 本体与密码永不经 API 回传）。
+        // 应用签名：keystore 只活在数据库，由超管上传；正式签名在服务端完成。
         .route("/api/admin/app-signing", get(get_app_signing).put(put_app_signing))
-        .route("/api/admin/app-signing/generate", post(generate_app_signing))
         .route("/api/admin/app-signing/sign", post(sign_app_release))
         .route("/api/admin/recovery", post(recover))
         .route("/api/admin/accounts", get(accounts))
@@ -1349,15 +1347,6 @@ async fn put_app_signing(
             &key_password,
         )
         .await?,
-    ))
-}
-
-async fn generate_app_signing(
-    State(state): State<AppState>,
-    user: CurrentUser,
-) -> Result<Json<Value>, AppError> {
-    Ok(Json(
-        crate::ops::app_signing::generate_keystore(&state, &user).await?,
     ))
 }
 

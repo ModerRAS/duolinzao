@@ -26,7 +26,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl default-jre-headless unzip \
     && rm -rf /var/lib/apt/lists/*
 # 应用签名在服务端完成：JRE 跑 apksigner（只取 build-tools 35.0.1，不装整个 SDK；
-# --version 即校验布局）；空库自动生成 keystore 用 JRE 自带的 keytool（出口校验）。
+# --version 即校验布局）。
 RUN set -eux; \
     curl -fsSL -o /tmp/build-tools.zip https://dl.google.com/android/repository/build-tools_r35.0.1_linux.zip; \
     mkdir -p /tmp/bt /opt/android-sdk; \
@@ -37,9 +37,7 @@ RUN set -eux; \
     test -n "$SIGNERDIR" && test -x "$SIGNERDIR/apksigner"; \
     ln -s "$SIGNERDIR" /opt/android-bt; \
     du -sh /opt/android-sdk; \
-    /opt/android-bt/apksigner --version; \
-    command -v keytool; \
-    keytool -help >/dev/null
+    /opt/android-bt/apksigner --version
 ENV PATH="/opt/android-bt:${PATH}"
 WORKDIR /app
 COPY LICENSE /app/LICENSE

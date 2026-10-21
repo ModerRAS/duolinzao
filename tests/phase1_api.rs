@@ -298,7 +298,7 @@ async fn prepare() -> Api {
             account, invite_code, canteen, role_assignment, canteen_member, canteen_staff,
             device, session, passkey, totp_credential, email_otp_challenge, magic_link, login_approval, login_attempt,
             shift_plan, meal_template, meal_day_lock, meal_order, dish, menu_pick, score,
-            comment, preference, notification, llm_channel, audit_log, app_setting, app_signing
+            comment, preference, notification, llm_channel, audit_log, app_setting
         RESTART IDENTITY CASCADE
         "#,
     )
@@ -2503,38 +2503,14 @@ async fn app_signing_keystore_in_db() {
     )
     .json();
     assert_eq!(status["configured"], false, "{status}");
-    // 空库生成：有 keytool 则落行（重复调用报已配置）；无 keytool 则明确报缺工具。
-    // 注意：此后不再有 signing_not_configured——空库点「签名发布」会先自动生成再签。
-    let gen = api
-        .call("POST", "/api/admin/app-signing/generate", Some(&super_token), None, None, None)
-        .await;
-    if gen.status == StatusCode::OK {
-        let body = gen.json();
-        assert_eq!(body["configured"], true, "{body}");
-        assert_eq!(body["key_alias"], "duolinzao", "{body}");
-        // 状态响应只含非秘密字段。
-        let keys: Vec<&str> = body.as_object().unwrap().keys().map(String::as_str).collect();
-        for key in ["configured", "key_alias", "keystore_sha256", "updated_at"] {
-            assert!(keys.contains(&key), "状态缺 {key}，{body}");
-        }
-        // 精确匹配：指纹键 keystore_sha256 是允许的，绝不能用 contains 误杀。
-        for key in ["keystore", "keystore_password", "key_password", "ciphertext", "password"] {
-            assert!(!keys.contains(&key), "状态不得含 {key}，{body}");
-        }
-        let dup = must(
-            api.call("POST", "/api/admin/app-signing/generate", Some(&super_token), None, None, None)
-                .await,
-            StatusCode::BAD_REQUEST,
-            "generate twice",
-        )
-        .json();
-        assert_eq!(dup["error"], "signing_already_configured", "{dup}");
-    } else {
-        assert_eq!(gen.status, StatusCode::INTERNAL_SERVER_ERROR, "无 keytool 应报缺工具");
-        assert_eq!(gen.json()["error"], "signing_unavailable", "{}", gen.json());
-    }
-    // 复位为空库，保后续 PUT 断言不受上面的生成影响。
-    sqlx::query("DELETE FROM app_signing").execute(&api.pool).await.unwrap();
+    let denied = must(
+        api.call("POST", "/api/admin/app-signing/sign", Some(&super_token), None, None, None)
+            .await,
+        StatusCode::BAD_REQUEST,
+        "sign without keystore",
+    )
+    .json();
+    assert_eq!(denied["error"], "signing_not_configured", "{denied}");
 
     // 普通员工：连状态都看不到。
     let (emp_token, _) = register_user(&api, &super_token, "emp-signing").await;
@@ -2582,7 +2558,7 @@ async fn app_signing_keystore_in_db() {
     let fingerprint = saved["keystore_sha256"].as_str().unwrap_or_default().to_string();
     assert_eq!(fingerprint.len(), 64, "指纹应为 sha256 hex，{saved}");
     // 密码与 keystore 本体永不出现在响应里。
-    for key in ["keystore", "keystore_password", "key_password", "key_ciphertext", "ciphertext", "password"] {
+    for key in ["keystore", "keystore_password", "key_password", "key_ciphertext"] {
         assert!(saved.get(key).is_none(), "响应不得含 {key}，{saved}");
     }
 
@@ -2597,235 +2573,6 @@ async fn app_signing_keystore_in_db() {
     assert_eq!(status["configured"], true, "{status}");
     assert_eq!(status["key_alias"], "test-key", "{status}");
     assert_eq!(status["keystore_sha256"], fingerprint.as_str(), "{status}");
-
-    // 硬规则：绝无导出/下载路由——可猜到的泄漏路径必须全部 404。
-    for uri in [
-        "/api/admin/app-signing/download",
-        "/api/admin/app-signing/export",
-        "/api/admin/app-signing/keystore",
-    ] {
-        let leaked = api.call("GET", uri, Some(&super_token), None, None, None).await;
-        assert_eq!(leaked.status, StatusCode::NOT_FOUND, "{uri} 不得存在");
-    }
-
-    // 审计只记别名 + 指纹 + 是否覆盖：密码与 keystore 字节永不进审计。
-    let audits = must(
-        api.call("GET", "/api/admin/audit", Some(&super_token), None, None, None).await,
-        StatusCode::OK,
-        "audit",
-    )
-    .json();
-    let entry = audits["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|item| item["action"] == "app_signing")
-        .find(|item| item["summary"].get("file_bytes").is_some())
-        .expect("应有 PUT keystore 审计")
-        .clone();
-    assert_eq!(entry["summary"]["replaced"], false, "空库首次上传 replaced=false，{entry}");
-    for secret in ["ks-pass-1", "key-pass-1", "fake-jks-bytes"] {
-        assert!(!entry.to_string().contains(secret), "审计不得含 {secret}，{entry}");
-    }
-}
-
-#[tokio::test]
-async fn app_signing_auto_generate_sign_and_overwrite() {
-    let _gate = GATE.lock().await;
-    let api = prepare().await;
-    let super_token = must(
-        api.call(
-            "POST",
-            "/api/session/password",
-            None,
-            Some(json!({"username": "root", "password": "root-password-1"})),
-            Some("signing-auto-root"),
-            None,
-        )
-        .await,
-        StatusCode::OK,
-        "super login",
-    )
-    .token();
-
-    // 待签包夹具：自建带 static_dir 的 state（公共 prepare 不配静态目录）。
-    let app_dir = std::env::temp_dir().join("duolinzao-phase1-sign");
-    let _ = std::fs::remove_dir_all(&app_dir);
-    std::fs::create_dir_all(app_dir.join("app")).unwrap();
-    std::fs::write(
-        app_dir.join("app/version.json"),
-        r#"{"versionCode":7,"versionName":"0.1.6","url":"/app/duolinzao.apk","sha256":"abc","signing":"unsigned"}"#,
-    )
-    .unwrap();
-    std::fs::write(app_dir.join("app/duolinzao.apk"), b"fake-apk-bytes").unwrap();
-    let raw_cfg = example_config().replace(
-        "[server]",
-        &format!("[server]\nstatic_dir = \"{}\"", app_dir.to_str().unwrap()),
-    );
-    let config = AppConfig::parse(&raw_cfg).unwrap();
-    let state = AppState::new(
-        api.pool.clone(),
-        config,
-        Arc::new(ManualClock::new(
-            Utc.with_ymd_and_hms(2026, 10, 10, 2, 0, 0).single().unwrap(),
-        )),
-        api.mailer.clone(),
-        Arc::new(api.scripts.clone()),
-    )
-    .unwrap();
-    let app = router(state);
-
-    // 假 apksigner：测试环境无 Android SDK；sign 做拷贝、verify 恒过。
-    // 只验证服务端流程（生成→入库→签→写 version.json），不验证 apksigner 本体。
-    let shim = std::env::temp_dir().join("duolinzao-phase1-shim");
-    let _ = std::fs::remove_dir_all(&shim);
-    std::fs::create_dir_all(&shim).unwrap();
-    std::fs::write(
-        shim.join("apksigner"),
-        "#!/bin/sh\nif [ \"$1\" = \"verify\" ]; then exit 0; fi\nout=\"\"; prev=\"\";\nfor a in \"$@\"; do if [ \"$prev\" = \"--out\" ]; then out=\"$a\"; fi; prev=\"$a\"; done\neval \"input=\\${$#}\"\ncp \"$input\" \"$out\"\n",
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(shim.join("apksigner"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-    }
-    let old_path = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths = vec![shim.clone()];
-    paths.extend(std::env::split_paths(&old_path));
-    std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-
-    async fn authed(app: &axum::Router, method: &str, uri: &str, token: &str) -> Resp {
-        let request = Request::builder()
-            .method(method)
-            .uri(uri)
-            .header("x-dlz-requested", "1")
-            .header("cookie", format!("dlz_session={token}"))
-            .header("user-agent", "phase1-test")
-            .body(Body::empty())
-            .unwrap();
-        let response = app.clone().oneshot(request).await.expect("oneshot");
-        let status = response.status();
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        Resp { status, bytes: bytes.to_vec(), cookie: None }
-    }
-
-    // 空库点「签名发布」：无 keytool 的环境跳过（CI 的 test job 自带 JRE，真跑）。
-    let signed = authed(&app, "POST", "/api/admin/app-signing/sign", &super_token).await;
-    if signed.status == StatusCode::INTERNAL_SERVER_ERROR
-        && signed.json()["error"] == "signing_unavailable"
-    {
-        std::env::set_var("PATH", &old_path);
-        eprintln!("skip app_signing_auto_generate: 本机无 keytool");
-        return;
-    }
-    let signed = must(signed, StatusCode::OK, "auto sign").json();
-    assert_eq!(signed["keystore_generated"], true, "空库首签应自动生成，{signed}");
-    assert_eq!(signed["signing"], "release", "{signed}");
-    assert_eq!(signed["versionCode"], 7, "{signed}");
-    // version.json 落盘：signing=release，sha256 与 APK 文件对得上。
-    let meta: Value =
-        serde_json::from_str(&std::fs::read_to_string(app_dir.join("app/version.json")).unwrap())
-            .unwrap();
-    assert_eq!(meta["signing"], "release", "{meta}");
-    assert_eq!(meta["sha256"], signed["sha256"].as_str().unwrap(), "{meta}");
-    let apk = std::fs::read(app_dir.join("app/duolinzao.apk")).unwrap();
-    assert_eq!(apk, b"fake-apk-bytes", "假 apksigner 应原样拷贝");
-    {
-        use sha2::Digest;
-        assert_eq!(hex::encode(sha2::Sha256::digest(&apk)), signed["sha256"].as_str().unwrap());
-    }
-    // DB 已有行：自动生成的别名固定为 duolinzao。
-    let status =
-        must(authed(&app, "GET", "/api/admin/app-signing", &super_token).await, StatusCode::OK, "status")
-            .json();
-    assert_eq!(status["configured"], true, "{status}");
-    assert_eq!(status["key_alias"], "duolinzao", "{status}");
-    let fp1 = status["keystore_sha256"].as_str().unwrap().to_string();
-    assert_eq!(fp1.len(), 64, "{status}");
-
-    // 覆盖上传自己的 key：指纹变化，之后再签不再标记生成。
-    let boundary = "signingautoboundary";
-    let mut payload = Vec::new();
-    let mut part = |name: &str, filename: Option<&str>, ctype: &str, data: &[u8]| {
-        payload.extend_from_slice(
-            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"").as_bytes(),
-        );
-        if let Some(file) = filename {
-            payload.extend_from_slice(format!("; filename=\"{file}\"").as_bytes());
-        }
-        payload.extend_from_slice(format!("\r\nContent-Type: {ctype}\r\n\r\n").as_bytes());
-        payload.extend_from_slice(data);
-        payload.extend_from_slice(b"\r\n");
-    };
-    part("keystore", Some("own.jks"), "application/octet-stream", b"second-jks-bytes");
-    part("keystore_password", None, "text/plain", b"ks-pass-2");
-    part("key_alias", None, "text/plain", b"custom-key");
-    part("key_password", None, "text/plain", b"key-pass-2");
-    payload.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-    let request = Request::builder()
-        .method("PUT")
-        .uri("/api/admin/app-signing")
-        .header("x-dlz-requested", "1")
-        .header("cookie", format!("dlz_session={super_token}"))
-        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
-        .body(Body::from(payload))
-        .unwrap();
-    let response = app.clone().oneshot(request).await.expect("upload");
-    assert_eq!(response.status(), StatusCode::OK, "覆盖上传应成功");
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let saved: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(saved["key_alias"], "custom-key", "{saved}");
-    let fp2 = saved["keystore_sha256"].as_str().unwrap().to_string();
-    assert_ne!(fp2, fp1, "覆盖后指纹应变，{saved}");
-    let signed2 =
-        must(authed(&app, "POST", "/api/admin/app-signing/sign", &super_token).await, StatusCode::OK, "re-sign")
-            .json();
-    assert_eq!(signed2["keystore_generated"], false, "已有 key 不应再生成，{signed2}");
-    assert_eq!(signed2["signing"], "release", "{signed2}");
-    std::env::set_var("PATH", &old_path);
-
-    // 审计：生成/覆盖/签名三类条目只含非秘密字段；已知密码与 keystore 字节永不出现。
-    let audits = must(
-        api.call("GET", "/api/admin/audit", Some(&super_token), None, None, None).await,
-        StatusCode::OK,
-        "audit",
-    )
-    .json();
-    let items = audits["items"].as_array().unwrap();
-    let generated = items
-        .iter()
-        .filter(|item| item["action"] == "app_signing")
-        .find(|item| item["summary"].get("generated") == Some(&json!(true)))
-        .expect("应有自动生成审计")
-        .clone();
-    let gen_keys: Vec<&str> =
-        generated["summary"].as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(gen_keys.len(), 3, "生成审计只应有 3 个键，{generated}");
-    let replaced = items
-        .iter()
-        .filter(|item| item["action"] == "app_signing")
-        .find(|item| item["summary"].get("replaced") == Some(&json!(true)))
-        .expect("应有覆盖审计")
-        .clone();
-    assert_eq!(replaced["summary"]["alias"], "custom-key", "{replaced}");
-    let signs: Vec<&Value> =
-        items.iter().filter(|item| item["action"] == "app_sign_release").collect();
-    assert_eq!(signs.len(), 2, "应有两次签名审计");
-    for entry in items.iter().filter(|item| {
-        item["action"] == "app_signing" || item["action"] == "app_sign_release"
-    }) {
-        for secret in ["ks-pass-2", "key-pass-2", "second-jks-bytes"] {
-            assert!(!entry.to_string().contains(secret), "审计不得含 {secret}，{entry}");
-        }
-        for key in ["password", "ciphertext"] {
-            assert!(
-                entry["summary"].get(key).is_none(),
-                "审计 summary 不得含 {key}，{entry}"
-            );
-        }
-    }
 }
 
 #[tokio::test]
