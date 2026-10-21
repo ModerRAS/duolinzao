@@ -46,6 +46,7 @@ fun MineScreen(onLogout: () -> Unit, onOpenShift: () -> Unit) {
     val scope = rememberCoroutineScope()
     val me = Session.me.collectAsState().value
     var error by remember { mutableStateOf<String?>(null) }
+    var okMsg by remember { mutableStateOf<String?>(null) }
     var devices by remember { mutableStateOf<DevicesResp?>(null) }
     var approvals by remember { mutableStateOf<List<ApprovalItem>>(emptyList()) }
     var notices by remember { mutableStateOf<List<Notice>>(emptyList()) }
@@ -70,6 +71,7 @@ fun MineScreen(onLogout: () -> Unit, onOpenShift: () -> Unit) {
             canteens = Session.repo.allCanteens()
             bound = Session.repo.myCanteens().map { it.id }.toSet()
             error = null
+            okMsg = null
         } catch (e: Exception) {
             error = e.message ?: "加载失败"
         }
@@ -80,7 +82,7 @@ fun MineScreen(onLogout: () -> Unit, onOpenShift: () -> Unit) {
     LaunchedEffect(Unit) { refreshAll() }
 
     suspend fun run(call: suspend () -> Unit, ok: String) {
-        try { call(); loadAll(); if (ok.isNotEmpty()) error = ok } catch (e: Exception) { error = if (e is ApiException) e.message else "操作失败" }
+        try { call(); loadAll(); if (ok.isNotEmpty()) okMsg = ok } catch (e: Exception) { error = if (e is ApiException) e.message else "操作失败" }
     }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
@@ -188,7 +190,7 @@ fun MineScreen(onLogout: () -> Unit, onOpenShift: () -> Unit) {
             scope.launch {
                 try {
                     val remote = Session.repo.checkUpdate() ?: Updater.fetchRemote(context)
-                    if (remote == null) { updateMsg = "当前为演示/离线模式，无更新源"; return@launch }
+                    if (remote == null) { updateMsg = "未能获取更新信息（站点 /app/version.json 不可用）"; return@launch }
                     val (code, _) = Updater.localVersion(context)
                     if (!Updater.needsUpdate(code, remote)) { updateMsg = "已是最新（${remote.versionName}）"; return@launch }
                     updateMsg = "发现新版 ${remote.versionName}，下载中…"
@@ -219,6 +221,7 @@ fun MineScreen(onLogout: () -> Unit, onOpenShift: () -> Unit) {
             }
         }
         TextButton(onClick = onOpenShift) { Text("去选择班制") }
+        SuccessLine(okMsg)
         ErrorLine(error)
         Text("Powered by 多邻灶 · Version: ${Updater.localVersion(context).second}", style = MaterialTheme.typography.bodySmall)
     }

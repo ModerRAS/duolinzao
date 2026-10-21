@@ -38,31 +38,47 @@ fun ShiftScreen(onBack: () -> Unit) {
     var desc by remember { mutableStateOf("") }
     var preview by remember { mutableStateOf<TemplateResp?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var okMsg by remember { mutableStateOf<String?>(null) }
+    var anchor by remember { mutableStateOf(shanghaiToday()) }
+    var canteenId by remember { mutableStateOf<String?>(null) }
     var picked by remember { mutableStateOf<MutableMap<String, Boolean>>(mutableMapOf()) }
 
+    suspend fun load() {
+        try {
+            kind = Session.repo.shift().kind
+            canteenId = Session.repo.myCanteens().firstOrNull()?.id
+            error = null
+        } catch (e: Exception) {
+            error = e.message ?: "加载失败"
+        }
+    }
     fun refresh() {
         scope.launch {
-            try {
-                kind = Session.repo.shift().kind
-                error = null
-            } catch (e: Exception) {
-                error = e.message ?: "加载失败"
-            }
+            load()
+            okMsg = null
         }
     }
     LaunchedEffect(Unit) { refresh() }
 
+    suspend fun setShift(selected: String) {
+        try {
+            val cid = canteenId ?: throw ApiException(400, "canteen_required", "请先到「我的」绑定食堂")
+            // 上二休四必须带锚点日（服务端 anchor_required）；自定义不需要。
+            Session.repo.putShift(selected, if (selected == "work2_rest4") anchor else null, cid)
+            load()
+            okMsg = "已切换班制"
+        } catch (e: Exception) {
+            error = if (e is ApiException) e.message else "切换失败"
+        }
+    }
+
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text("选择班制", style = MaterialTheme.typography.headlineSmall)
         Text("仅「上二休四」/「自定义」", style = MaterialTheme.typography.bodySmall)
+        DlTextField(anchor, { anchor = it }, "锚点日 YYYY-MM-DD（上二休四用）")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 8.dp)) {
             Card(
-                Modifier.weight(1f).clickable {
-                    scope.launch {
-                        try { Session.repo.putShift("work2_rest4", null, null); refresh() }
-                        catch (e: Exception) { error = e.message }
-                    }
-                },
+                Modifier.weight(1f).clickable { scope.launch { setShift("work2_rest4") } },
             ) {
                 Column(Modifier.padding(12.dp)) {
                     Text("上二休四")
@@ -70,12 +86,7 @@ fun ShiftScreen(onBack: () -> Unit) {
                 }
             }
             Card(
-                Modifier.weight(1f).clickable {
-                    scope.launch {
-                        try { Session.repo.putShift("custom", null, null); refresh() }
-                        catch (e: Exception) { error = e.message }
-                    }
-                },
+                Modifier.weight(1f).clickable { scope.launch { setShift("custom") } },
             ) {
                 Column(Modifier.padding(12.dp)) {
                     Text("自定义排班")
@@ -83,6 +94,7 @@ fun ShiftScreen(onBack: () -> Unit) {
                 }
             }
         }
+        SuccessLine(okMsg)
 
         SectionTitle("用描述生成模板")
         DlTextField(desc, { desc = it }, "例如：周一周二上班吃午餐")

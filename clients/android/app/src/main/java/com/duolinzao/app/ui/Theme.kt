@@ -71,6 +71,15 @@ fun ErrorLine(message: String?) {
     }
 }
 
+/** 成功提示走绿色，别再用红色 ErrorLine 显示「已提交/已保存」。 */
+@Composable
+fun SuccessLine(message: String?) {
+    if (!message.isNullOrEmpty()) {
+        Spacer(Modifier.height(8.dp))
+        Text(message, color = Color(0xFF2D8A45), style = MaterialTheme.typography.bodySmall)
+    }
+}
+
 @Composable
 fun SectionTitle(text: String) {
     Text(text, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(vertical = 8.dp))

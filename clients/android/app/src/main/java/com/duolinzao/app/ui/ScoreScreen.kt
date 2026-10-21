@@ -37,6 +37,7 @@ fun ScoreScreen() {
     var slot by remember { mutableStateOf("lunch") }
     var targets by remember { mutableStateOf<ScoreTargets?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var okMsg by remember { mutableStateOf<String?>(null) }
     var values by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     var comments by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var anonymous by remember { mutableStateOf(true) }
@@ -45,6 +46,7 @@ fun ScoreScreen() {
         try {
             targets = Session.repo.scoreTargets(date, slot)
             error = null
+            okMsg = null
         } catch (e: Exception) {
             error = e.message ?: "加载失败"
         }
@@ -104,7 +106,7 @@ fun ScoreScreen() {
                                         Session.repo.submitScore(date, slot, dish.dish_id, value,
                                             comments[dish.dish_id]?.takeIf { it.isNotBlank() }, anonymous)
                                         load()
-                                        error = "已提交：${dish.name}"
+                                        okMsg = "已提交：${dish.name}"
                                     } catch (e: Exception) {
                                         error = if (e is ApiException) e.message else "提交失败"
                                     }
@@ -119,6 +121,7 @@ fun ScoreScreen() {
             RadioButton(selected = anonymous, onClick = { anonymous = !anonymous })
             Text("匿名评语", Modifier.padding(start = 4.dp))
         }
+        SuccessLine(okMsg)
         ErrorLine(error)
     }
 }
