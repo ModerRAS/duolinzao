@@ -72,6 +72,14 @@ interface DlRepository {
     suspend fun checkUpdate(): VersionInfo?
     /** 食堂人数：所选日期早/午/晚有效报餐人数（Web OverviewPage 同接口）。 */
     suspend fun headcount(canteenId: String, date: String): Headcount
+    /** 菜谱列表：按菜/饭/汤分组（Web MenuPage 同接口）。 */
+    suspend fun dishes(canteenId: String): Map<String, List<Dish>>
+    suspend fun createDish(canteenId: String, name: String, kind: String, tags: List<String>, enabled: Boolean): Dish
+    suspend fun updateDish(canteenId: String, dishId: String, name: String, kind: String, tags: List<String>, enabled: Boolean): Dish
+    /** 选菜周视图 / 当餐 / 写回（Web OptimizePage 同接口）。 */
+    suspend fun selectionWeek(canteenId: String, date: String): SelectionWeekResp
+    suspend fun selectionSlot(canteenId: String, date: String, slot: String): SelectionSlotResp
+    suspend fun putSelection(canteenId: String, date: String, slot: String, dishIds: List<String>): SelectionSlotResp
 }
 
 private val SHANGHAI: ZoneId = ZoneId.of("Asia/Shanghai")
@@ -79,6 +87,18 @@ private val DF: DateTimeFormatter = DateTimeFormatter.ISO_LOCAL_DATE
 
 fun shanghaiToday(): String = LocalDate.now(SHANGHAI).format(DF)
 fun addDays(iso: String, days: Long): String = LocalDate.parse(iso).plusDays(days).format(DF)
+/** 周一起始（与 Web weekStart 同规则）。 */
+fun weekStart(iso: String): String {
+    val d = LocalDate.parse(iso)
+    return d.minusDays((d.dayOfWeek.value - 1).toLong()).format(DF)
+}
+val SLOTS = listOf("breakfast", "lunch", "dinner")
+/** 下一餐：只切 date/slot（与 Web jump 同规则）。 */
+fun nextSlot(date: String, slot: String): Pair<String, String> {
+    val i = SLOTS.indexOf(slot)
+    return if (i < 0 || i + 1 >= SLOTS.size) Pair(addDays(date, 1), SLOTS.first())
+    else Pair(date, SLOTS[i + 1])
+}
 
 class NetworkRepository(private val api: ApiClient) : DlRepository {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
@@ -225,5 +245,27 @@ class NetworkRepository(private val api: ApiClient) : DlRepository {
     }
     override suspend fun headcount(canteenId: String, date: String): Headcount =
         parse(api.get("/api/canteens/$canteenId/headcount?date=$date"))
+    override suspend fun dishes(canteenId: String): Map<String, List<Dish>> =
+        parse<DishGroupsResp>(api.get("/api/canteens/$canteenId/dishes")).groups
+    override suspend fun createDish(canteenId: String, name: String, kind: String, tags: List<String>, enabled: Boolean): Dish =
+        parse(api.post("/api/canteens/$canteenId/dishes", buildJsonObject {
+            put("name", name); put("kind", kind)
+            put("taste_tags", buildJsonArray { tags.forEach { add(it) } })
+            put("enabled", enabled)
+        }.toString()))
+    override suspend fun updateDish(canteenId: String, dishId: String, name: String, kind: String, tags: List<String>, enabled: Boolean): Dish =
+        parse(api.put("/api/canteens/$canteenId/dishes/$dishId", buildJsonObject {
+            put("name", name); put("kind", kind)
+            put("taste_tags", buildJsonArray { tags.forEach { add(it) } })
+            put("enabled", enabled); put("canteen_id", canteenId)
+        }.toString()))
+    override suspend fun selectionWeek(canteenId: String, date: String): SelectionWeekResp =
+        parse(api.get("/api/canteens/$canteenId/selection/week?date=$date"))
+    override suspend fun selectionSlot(canteenId: String, date: String, slot: String): SelectionSlotResp =
+        parse(api.get("/api/canteens/$canteenId/selection?date=$date&slot=$slot"))
+    override suspend fun putSelection(canteenId: String, date: String, slot: String, dishIds: List<String>): SelectionSlotResp =
+        parse(api.put("/api/canteens/$canteenId/selection/$date/$slot", buildJsonObject {
+            put("dish_ids", buildJsonArray { dishIds.forEach { add(it) } })
+        }.toString()))
 
 }

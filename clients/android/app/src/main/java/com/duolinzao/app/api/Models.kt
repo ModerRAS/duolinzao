@@ -219,6 +219,58 @@ data class NoticeList(val items: List<Notice> = emptyList())
 data class TotpSetup(val secret: String = "", val otpauth_url: String = "")
 
 @Serializable
+data class Dish(
+    val id: String = "",
+    val name: String = "",
+    val kind: String = "",
+    val taste_tags: List<String> = emptyList(),
+    val image_url: String? = null,
+    val enabled: Boolean = true,
+    val canteen_id: String = "",
+)
+
+@Serializable
+data class DishGroupsResp(val groups: Map<String, List<Dish>> = emptyMap())
+
+@Serializable
+data class Candidate(
+    val dish_id: String = "",
+    val name: String = "",
+    val kind: String = "",
+    val taste_tags: List<String> = emptyList(),
+    val image_url: String? = null,
+    val selected: Boolean = false,
+    val tone: String = "",
+)
+
+@Serializable
+data class NextSlot(val date: String = "", val slot: String = "")
+
+@Serializable
+data class SelectionSlotResp(
+    val date: String = "",
+    val slot: String = "",
+    val expected_headcount: Int = 0,
+    val groups: Map<String, List<Candidate>> = emptyMap(),
+    val next: NextSlot = NextSlot(),
+)
+
+@Serializable
+data class WeekDish(val dish_id: String = "", val name: String = "", val tone: String = "")
+
+@Serializable
+data class WeekCell(
+    val expected_headcount: Int = 0,
+    val groups: Map<String, List<WeekDish>> = emptyMap(),
+)
+
+@Serializable
+data class WeekDay(val date: String = "", val slots: Map<String, WeekCell> = emptyMap())
+
+@Serializable
+data class SelectionWeekResp(val week_start: String = "", val days: List<WeekDay> = emptyList())
+
+@Serializable
 data class VersionInfo(
     val versionCode: Int = 0,
     val versionName: String = "",

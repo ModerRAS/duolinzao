@@ -40,6 +40,22 @@ class SmokeUiTest {
         composeRule.onNodeWithTag("tab_menu").assertIsDisplayed()
         composeRule.onNodeWithTag("tab_more").assertIsDisplayed()
         composeRule.onNodeWithTag("headcount_card_lunch").assertIsDisplayed()
+
+        // C2 菜谱：列表真数据，无占位文案
+        composeRule.onNodeWithTag("tab_menu").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("menu_new").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("menu_new").assertIsDisplayed()
+        composeRule.onNodeWithTag("menu_row_d1").assertIsDisplayed()
+
+        // C3 选菜：周视图真数据，无占位文案
+        composeRule.onNodeWithTag("tab_optimize").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("opt_prev_week").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("opt_prev_week").assertIsDisplayed()
+        composeRule.onNodeWithTag("opt_next_week").assertIsDisplayed()
     }
 
     @Test

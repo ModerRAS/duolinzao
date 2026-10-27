@@ -215,6 +215,80 @@ class MockRepository : DlRepository {
         notices.replaceAll { if (it.id == id) it.copy(read_at = "2026-10-20T00:00:00Z") else it }
     }
     override suspend fun checkUpdate(): VersionInfo? = null
+    private val dishes: MutableMap<String, MutableList<Dish>> = mutableMapOf(
+        "c1" to mutableListOf(
+            Dish("d1", "番茄炒蛋", "菜", listOf("酸"), null, true, "c1"),
+            Dish("d2", "米饭", "饭", emptyList(), null, true, "c1"),
+            Dish("d3", "紫菜汤", "汤", emptyList(), null, true, "c1"),
+        ),
+        "c2" to mutableListOf(
+            Dish("d4", "青椒肉丝", "菜", listOf("辣"), null, true, "c2"),
+        ),
+    )
+    private val picks: MutableMap<String, MutableSet<String>> = mutableMapOf(
+        "${"c1"}/${shanghaiToday()}/lunch" to mutableSetOf("d1", "d2"),
+    )
+    private var dishSeq = 5
+
+    private fun groupDishes(canteenId: String): Map<String, List<Dish>> {
+        val all = dishes[canteenId].orEmpty()
+        return mapOf("菜" to all.filter { it.kind == "菜" }, "饭" to all.filter { it.kind == "饭" }, "汤" to all.filter { it.kind == "汤" })
+    }
+
+    override suspend fun dishes(canteenId: String): Map<String, List<Dish>> {
+        needAuth()
+        return groupDishes(canteenId)
+    }
+    override suspend fun createDish(canteenId: String, name: String, kind: String, tags: List<String>, enabled: Boolean): Dish {
+        needAuth()
+        if (name.isBlank()) throw ApiException(400, "name_invalid", "名称不能为空")
+        if (kind !in listOf("菜", "饭", "汤")) throw ApiException(400, "kind_invalid", "类别只能是菜、饭、汤")
+        val dish = Dish("d${dishSeq++}", name.trim(), kind, tags, null, enabled, canteenId)
+        dishes.getOrPut(canteenId) { mutableListOf() }.add(dish)
+        return dish
+    }
+    override suspend fun updateDish(canteenId: String, dishId: String, name: String, kind: String, tags: List<String>, enabled: Boolean): Dish {
+        needAuth()
+        val list = dishes[canteenId] ?: throw ApiException(404, "dish_not_found", "菜品不存在")
+        val i = list.indexOfFirst { it.id == dishId }
+        if (i < 0) throw ApiException(404, "dish_not_found", "菜品不存在")
+        if (name.isBlank()) throw ApiException(400, "name_invalid", "名称不能为空")
+        val updated = list[i].copy(name = name.trim(), kind = kind, taste_tags = tags, enabled = enabled)
+        list[i] = updated
+        return updated
+    }
+    override suspend fun selectionSlot(canteenId: String, date: String, slot: String): SelectionSlotResp {
+        needAuth()
+        val enabled = dishes[canteenId].orEmpty().filter { it.enabled }
+        val picked = picks["$canteenId/$date/$slot"].orEmpty()
+        val groups = mapOf("菜" to enabled.filter { it.kind == "菜" }, "饭" to enabled.filter { it.kind == "饭" }, "汤" to enabled.filter { it.kind == "汤" })
+            .mapValues { (_, items) -> items.map { Candidate(it.id, it.name, it.kind, it.taste_tags, null, picked.contains(it.id), if (picked.contains(it.id)) "green" else "amber") } }
+        val (nd, ns) = nextSlot(date, slot)
+        return SelectionSlotResp(date, slot, 88, groups, NextSlot(nd, ns))
+    }
+    override suspend fun selectionWeek(canteenId: String, date: String): SelectionWeekResp {
+        needAuth()
+        val start = weekStart(date)
+        val days = (0..6).map { offset ->
+            val day = addDays(start, offset.toLong())
+            val slots = SLOTS.associateWith { slot ->
+                val ids = picks["$canteenId/$day/$slot"].orEmpty()
+                val all = dishes[canteenId].orEmpty()
+                val groups = mapOf("菜" to all.filter { it.kind == "菜" && ids.contains(it.id) }, "饭" to all.filter { it.kind == "饭" && ids.contains(it.id) }, "汤" to all.filter { it.kind == "汤" && ids.contains(it.id) })
+                    .mapValues { (_, items) -> items.map { WeekDish(it.id, it.name, "green") } }
+                WeekCell(if (ids.isEmpty()) 0 else 88, groups)
+            }
+            WeekDay(day, slots)
+        }
+        return SelectionWeekResp(start, days)
+    }
+    override suspend fun putSelection(canteenId: String, date: String, slot: String, dishIds: List<String>): SelectionSlotResp {
+        needAuth()
+        val enabled = dishes[canteenId].orEmpty().filter { it.enabled }.map { it.id }.toSet()
+        if (dishIds.any { !enabled.contains(it) }) throw ApiException(400, "dish_invalid", "只能选择本食堂当前启用的餐品")
+        picks["$canteenId/$date/$slot"] = dishIds.toMutableSet()
+        return selectionSlot(canteenId, date, slot)
+    }
     override suspend fun headcount(canteenId: String, date: String): Headcount {
         needAuth()
         return Headcount(false, mapOf("breakfast" to 42, "lunch" to 118, "dinner" to 95))
