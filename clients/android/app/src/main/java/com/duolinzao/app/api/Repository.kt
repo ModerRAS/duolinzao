@@ -80,6 +80,19 @@ interface DlRepository {
     suspend fun selectionWeek(canteenId: String, date: String): SelectionWeekResp
     suspend fun selectionSlot(canteenId: String, date: String, slot: String): SelectionSlotResp
     suspend fun putSelection(canteenId: String, date: String, slot: String, dishIds: List<String>): SelectionSlotResp
+    /** C4 强提醒（与 AlertPage 同接口）。 */
+    suspend fun alerts(canteenId: String): AlertsResp
+    /** C4 评分汇总 / 评语（与 RatingPage / CommentsPage 同接口）。 */
+    suspend fun scoreSummaries(canteenId: String): Map<String, List<ScoreSummary>>
+    suspend fun comments(canteenId: String): Map<String, List<CommentRow>>
+    /** C5 截止后改单（与 OverridePage 同接口）。 */
+    suspend fun adminMeals(date: String, canteenId: String): AdminMealsResp
+    suspend fun adminPutMeal(accountId: String, date: String, slot: String, ordering: Boolean, canteenId: String)
+    /** C5 邀请码（与 InvitePage 同接口）。 */
+    suspend fun invites(): List<Invite>
+    suspend fun createInvite(maxUses: Int, role: String, canteenIds: List<String>): InviteCreated
+    suspend fun updateInviteMaxUses(id: String, maxUses: Int)
+    suspend fun revokeInvite(id: String)
 }
 
 private val SHANGHAI: ZoneId = ZoneId.of("Asia/Shanghai")
@@ -267,5 +280,33 @@ class NetworkRepository(private val api: ApiClient) : DlRepository {
         parse(api.put("/api/canteens/$canteenId/selection/$date/$slot", buildJsonObject {
             put("dish_ids", buildJsonArray { dishIds.forEach { add(it) } })
         }.toString()))
+    override suspend fun alerts(canteenId: String): AlertsResp =
+        parse(api.get("/api/canteens/$canteenId/alerts"))
+    override suspend fun scoreSummaries(canteenId: String): Map<String, List<ScoreSummary>> =
+        parse<ScoreSummariesResp>(api.get("/api/admin/score-summaries?canteen_id=$canteenId")).groups
+    override suspend fun comments(canteenId: String): Map<String, List<CommentRow>> =
+        parse<CommentsResp>(api.get("/api/admin/comments?canteen_id=$canteenId")).groups
+    override suspend fun adminMeals(date: String, canteenId: String): AdminMealsResp =
+        parse(api.get("/api/admin/meals?date=$date&canteen_id=$canteenId"))
+    override suspend fun adminPutMeal(accountId: String, date: String, slot: String, ordering: Boolean, canteenId: String) {
+        api.put("/api/admin/meals/$accountId/$date/$slot", buildJsonObject {
+            put("ordering", ordering); put("canteen_id", canteenId)
+        }.toString())
+    }
+    override suspend fun invites(): List<Invite> =
+        parse<InvitesResp>(api.get("/api/admin/invites")).items
+    override suspend fun createInvite(maxUses: Int, role: String, canteenIds: List<String>): InviteCreated =
+        parse(api.post("/api/admin/invites", buildJsonObject {
+            put("max_uses", maxUses); put("role", role)
+            put("canteen_ids", buildJsonArray { canteenIds.forEach { add(it) } })
+        }.toString()))
+    override suspend fun updateInviteMaxUses(id: String, maxUses: Int) {
+        api.put("/api/admin/invites/$id", buildJsonObject {
+            put("max_uses", maxUses)
+        }.toString())
+    }
+    override suspend fun revokeInvite(id: String) {
+        api.delete("/api/admin/invites/$id")
+    }
 
 }

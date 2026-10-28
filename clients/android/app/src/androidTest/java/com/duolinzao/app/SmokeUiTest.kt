@@ -56,6 +56,70 @@ class SmokeUiTest {
         }
         composeRule.onNodeWithTag("opt_prev_week").assertIsDisplayed()
         composeRule.onNodeWithTag("opt_next_week").assertIsDisplayed()
+
+        // C4/C5 更多：五子项按权限可见
+        composeRule.onNodeWithTag("tab_more").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("more_entry_alert").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("more_entry_alert").assertIsDisplayed()
+        composeRule.onNodeWithTag("more_entry_rating").assertIsDisplayed()
+        composeRule.onNodeWithTag("more_entry_comment").assertIsDisplayed()
+        composeRule.onNodeWithTag("more_entry_override").assertIsDisplayed()
+        composeRule.onNodeWithTag("more_entry_invite").assertIsDisplayed()
+
+        // C4 强提醒：样例行 + 去停用深链进菜谱编辑
+        composeRule.onNodeWithTag("more_entry_alert").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("alert_row_d1").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("alert_goto_d1").performScrollTo().performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("menu_form_from_alert").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("menu_form_from_alert").assertIsDisplayed()
+        composeRule.onNodeWithTag("menu_form_cancel").performScrollTo().performClick()
+
+        // C4 评分汇总：只读行
+        composeRule.onNodeWithTag("tab_more").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("more_entry_rating").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("more_entry_rating").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("rating_row_d1").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("rating_row_d1").assertIsDisplayed()
+        composeRule.onNodeWithTag("more_back").performScrollTo().performClick()
+
+        // C5 改单：行 + 改单按钮
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("more_entry_override").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("more_entry_override").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("override_toggle_a1_lunch").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("override_toggle_a1_lunch").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("more_back").performScrollTo().performClick()
+
+        // C5 邀请码：发放后明文只展示一次，关闭后不再重显
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("more_entry_invite").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("more_entry_invite").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("invite_create").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("invite_create").performScrollTo().performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("invite_code").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag("invite_code").assertIsDisplayed()
+        composeRule.onNodeWithTag("invite_close").performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithTag("invite_code").fetchSemanticsNodes().isEmpty()
+        }
     }
 
     @Test

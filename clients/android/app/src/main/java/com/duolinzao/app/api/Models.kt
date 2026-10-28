@@ -270,6 +270,99 @@ data class WeekDay(val date: String = "", val slots: Map<String, WeekCell> = emp
 @Serializable
 data class SelectionWeekResp(val week_start: String = "", val days: List<WeekDay> = emptyList())
 
+/** C4 强提醒（S5_ALERT）：均分偏低的菜。 */
+@Serializable
+data class AlertRow(
+    val dish_id: String = "",
+    val name: String = "",
+    val kind: String = "",
+    val sample_count: Long = 0,
+    val visible_mean: Double = 0.0,
+    val threshold: Double = 0.0,
+    val enabled: Boolean = true,
+    val message: String = "",
+)
+
+@Serializable
+data class AlertsResp(val groups: Map<String, List<AlertRow>> = emptyMap(), val threshold: Double = 0.0)
+
+/** C4 评分汇总（S5_RATING）：只读。 */
+@Serializable
+data class ScoreSummary(
+    val dish_id: String = "",
+    val name: String = "",
+    val kind: String = "",
+    val taste_tags: List<String> = emptyList(),
+    val image_url: String? = null,
+    val visible_mean: Double? = null,
+    val sample_count: Long = 0,
+    val counts: Map<String, Long> = emptyMap(),
+)
+
+@Serializable
+data class ScoreSummariesResp(val groups: Map<String, List<ScoreSummary>> = emptyMap())
+
+/** C4 评语（S5_COMMENT）：只读，无删除。 */
+@Serializable
+data class CommentRow(
+    val comment_id: String = "",
+    val body: String = "",
+    val anonymous: Boolean = true,
+    val meal_date: String = "",
+    val slot: String = "",
+    val dish_name: String = "",
+    val kind: String = "",
+    val username: String? = null,
+    val display_name: String? = null,
+)
+
+@Serializable
+data class CommentsResp(val groups: Map<String, List<CommentRow>> = emptyMap())
+
+/** C5 截止后改单（S5_OVERRIDE）。 */
+@Serializable
+data class AdminMealRow(
+    val account_id: String = "",
+    val username: String = "",
+    val display_name: String? = null,
+    val date: String = "",
+    val slot: String = "",
+    val canteen_id: String? = null,
+    val ordering: Boolean = false,
+    val locked_at: String? = null,
+)
+
+@Serializable
+data class AdminMealsResp(val locked: Boolean = false, val items: List<AdminMealRow> = emptyList())
+
+/** C5 邀请码（S6_*）。 */
+@Serializable
+data class Invite(
+    val id: String = "",
+    val created_at: String = "",
+    val used_at: String? = null,
+    val used_by: String? = null,
+    val used_by_display_name: String? = null,
+    val max_uses: Int = 1,
+    val used_count: Int = 0,
+    val revoked_at: String? = null,
+    val role: String = "employee",
+    val canteen_ids: List<String> = emptyList(),
+)
+
+@Serializable
+data class InvitesResp(val items: List<Invite> = emptyList())
+
+@Serializable
+data class InviteCreated(
+    val id: String = "",
+    val code: String = "",
+    val created_at: String = "",
+    val max_uses: Int = 1,
+    val role: String = "employee",
+    val canteen_ids: List<String> = emptyList(),
+)
+
 @Serializable
 data class VersionInfo(
     val versionCode: Int = 0,

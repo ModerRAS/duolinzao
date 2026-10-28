@@ -62,7 +62,7 @@ class MockRepository : DlRepository {
             return Me("mock-canteen", "canteen", "食堂演示", null, false, false,
                 listOf(RoleAssign("canteen", listOf("c1"))),
                 listOf("menu.read", "menu.write", "optimizer.read", "meal.admin_override",
-                    "rating.admin_read", "comment.admin_read", "meal.self_read"), true)
+                    "rating.admin_read", "comment.admin_read", "user.invite", "meal.self_read"), true)
         }
         return Me("mock-id", "demo", displayName, email, email != null, totpOn,
             listOf(RoleAssign("employee")), listOf("meal.self_read", "meal.self_write"), true)
@@ -288,6 +288,80 @@ class MockRepository : DlRepository {
         if (dishIds.any { !enabled.contains(it) }) throw ApiException(400, "dish_invalid", "只能选择本食堂当前启用的餐品")
         picks["$canteenId/$date/$slot"] = dishIds.toMutableSet()
         return selectionSlot(canteenId, date, slot)
+    }
+    private val adminOrders: MutableMap<String, Boolean> = mutableMapOf()
+    private val mockMembers = listOf(Triple("a1", "zhangsan", "张三"), Triple("a2", "lisi", null))
+    private val invites = mutableListOf<Invite>()
+    private var inviteSeq = 1
+
+    override suspend fun alerts(canteenId: String): AlertsResp {
+        needAuth()
+        val low = dishes[canteenId].orEmpty().filter { it.kind == "菜" }.take(1).map {
+            AlertRow(it.id, it.name, it.kind, 12, 0.5, 1.0, it.enabled, "样本已足够，均分低于当前阈值")
+        }
+        return AlertsResp(mapOf("菜" to low, "饭" to emptyList(), "汤" to emptyList()), 1.0)
+    }
+    override suspend fun scoreSummaries(canteenId: String): Map<String, List<ScoreSummary>> {
+        needAuth()
+        return groupDishes(canteenId).mapValues { (_, items) ->
+            items.map {
+                ScoreSummary(it.id, it.name, it.kind, it.taste_tags, null, 1.5, 10,
+                    mapOf("-2" to 0, "-1" to 1, "0" to 2, "1" to 4, "2" to 3))
+            }
+        }
+    }
+    override suspend fun comments(canteenId: String): Map<String, List<CommentRow>> {
+        needAuth()
+        val first = dishes[canteenId].orEmpty().firstOrNull()
+        val one = if (first == null) emptyList() else listOf(
+            CommentRow("cm1", "有点咸，下次少盐", true, shanghaiToday(), "lunch", first.name, first.kind, null, null),
+            CommentRow("cm2", "分量很足", false, shanghaiToday(), "lunch", first.name, first.kind, "zhangsan", "张三"),
+        )
+        val key = first?.kind ?: "菜"
+        return mapOf("菜" to if (key == "菜") one else emptyList(), "饭" to if (key == "饭") one else emptyList(), "汤" to if (key == "汤") one else emptyList())
+    }
+    override suspend fun adminMeals(date: String, canteenId: String): AdminMealsResp {
+        needAuth()
+        val items = mockMembers.flatMap { (id, username, display) ->
+            SLOTS.map { slot ->
+                AdminMealRow(id, username, display, date, slot, canteenId, adminOrders.getOrDefault("$id/$date/$slot", true), null)
+            }
+        }
+        return AdminMealsResp(false, items)
+    }
+    override suspend fun adminPutMeal(accountId: String, date: String, slot: String, ordering: Boolean, canteenId: String) {
+        needAuth()
+        if (slot !in SLOTS) throw ApiException(400, "slot_invalid", "餐次只有早、中、晚")
+        adminOrders["$accountId/$date/$slot"] = ordering
+    }
+    override suspend fun invites(): List<Invite> {
+        needAuth()
+        return invites.toList()
+    }
+    override suspend fun createInvite(maxUses: Int, role: String, canteenIds: List<String>): InviteCreated {
+        needAuth()
+        if (maxUses < 1) throw ApiException(400, "max_uses_invalid", "可使用次数至少为 1")
+        if (role != "employee" && role != "canteen") throw ApiException(400, "role_invalid", "邀请码角色只能是员工或食堂")
+        if (role == "employee" && canteenIds.isNotEmpty()) throw ApiException(400, "scope_invalid", "员工邀请码不带食堂范围")
+        if (role == "canteen" && canteenIds.isEmpty()) throw ApiException(400, "scope_invalid", "食堂邀请码必须带食堂范围")
+        val id = "inv${inviteSeq++}"
+        val code = "MOCK-${id.uppercase()}-CODE"
+        invites.add(0, Invite(id, shanghaiToday() + "T00:00:00Z", null, null, null, maxUses, 0, null, role, canteenIds))
+        return InviteCreated(id, code, shanghaiToday() + "T00:00:00Z", maxUses, role, canteenIds)
+    }
+    override suspend fun updateInviteMaxUses(id: String, maxUses: Int) {
+        needAuth()
+        val i = invites.indexOfFirst { it.id == id }
+        if (i < 0) throw ApiException(404, "invite_not_found", "邀请码不存在")
+        if (maxUses < 1) throw ApiException(400, "max_uses_invalid", "可使用次数至少为 1")
+        if (maxUses < invites[i].used_count) throw ApiException(400, "max_uses_invalid", "可使用次数不能小于已使用次数")
+        invites[i] = invites[i].copy(max_uses = maxUses)
+    }
+    override suspend fun revokeInvite(id: String) {
+        needAuth()
+        val i = invites.indexOfFirst { it.id == id }
+        if (i < 0) throw ApiException(404, "invite_not_found", "邀请码不存在")
+        invites[i] = invites[i].copy(revoked_at = shanghaiToday() + "T00:00:00Z")
     }
     override suspend fun headcount(canteenId: String, date: String): Headcount {
         needAuth()

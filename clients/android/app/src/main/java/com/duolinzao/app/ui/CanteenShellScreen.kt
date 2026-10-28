@@ -35,9 +35,14 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.duolinzao.app.api.ApiException
+import com.duolinzao.app.api.AdminMealRow
+import com.duolinzao.app.api.AlertRow
 import com.duolinzao.app.api.Canteen
 import com.duolinzao.app.api.Candidate
+import com.duolinzao.app.api.CommentRow
 import com.duolinzao.app.api.Dish
+import com.duolinzao.app.api.Invite
+import com.duolinzao.app.api.ScoreSummary
 import com.duolinzao.app.api.Session
 import com.duolinzao.app.api.addDays
 import com.duolinzao.app.api.shanghaiToday
@@ -71,6 +76,7 @@ fun CanteenShellScreen(onLogout: () -> Unit, onSwitchEmployee: () -> Unit) {
     var canteens by remember { mutableStateOf<List<Canteen>>(emptyList()) }
     var picked by remember { mutableStateOf("") }
     var scopeLoaded by remember { mutableStateOf(false) }
+    // 强提醒「去停用」深链：dishId，菜谱消费后清零。
     LaunchedEffect(me) {
         scope.launch {
             try {
@@ -85,6 +91,7 @@ fun CanteenShellScreen(onLogout: () -> Unit, onSwitchEmployee: () -> Unit) {
             scopeLoaded = true
         }
     }
+    var menuDeepLink by remember { mutableStateOf<String?>(null) }
     Scaffold(
         bottomBar = {
             NavigationBar {
@@ -101,8 +108,8 @@ fun CanteenShellScreen(onLogout: () -> Unit, onSwitchEmployee: () -> Unit) {
             when (tab) {
                 0 -> HeadcountTab(canteenId = picked, empty = empty)
                 1 -> OptimizeTab(canteenId = picked, empty = empty)
-                2 -> MenuTab(canteenId = picked, empty = empty)
-                3 -> MoreTab(onLogout = onLogout, onSwitchEmployee = onSwitchEmployee)
+                2 -> MenuTab(canteenId = picked, empty = empty, openDishId = menuDeepLink, onOpenConsumed = { menuDeepLink = null })
+                3 -> MoreTab(canteenId = picked, empty = empty, onLogout = onLogout, onSwitchEmployee = onSwitchEmployee, onGoToDish = { menuDeepLink = it; tab = 2 })
             }
         }
     }
@@ -201,9 +208,10 @@ private fun HeadcountTab(canteenId: String, empty: Boolean) {
     }
 }
 
-/** C2 菜谱（S4）：分组列表 / 新建编辑 / 行内启停（on→off 确认）。图片上传暂不支持（下一 PR）。 */
+/** C2 菜谱（S4）：分组列表 / 新建编辑 / 行内启停（on→off 确认）。图片上传暂不支持（下一 PR）。
+ * openDishId：强提醒「去停用」深链，命中后进编辑并聚焦启用开关。 */
 @Composable
-private fun MenuTab(canteenId: String, empty: Boolean) {
+private fun MenuTab(canteenId: String, empty: Boolean, openDishId: String?, onOpenConsumed: () -> Unit) {
     if (empty || canteenId.isEmpty()) {
         ScopeEmpty()
         return
@@ -215,6 +223,8 @@ private fun MenuTab(canteenId: String, empty: Boolean) {
     var error by remember { mutableStateOf<String?>(null) }
     var editing by remember(canteenId) { mutableStateOf<Dish?>(null) }
     var creating by remember { mutableStateOf(false) }
+    var fromAlert by remember(canteenId) { mutableStateOf(false) }
+    var deepLinked by remember(canteenId) { mutableStateOf(false) }
     var confirmOff by remember { mutableStateOf<Dish?>(null) }
     fun load() {
         scope.launch {
@@ -232,14 +242,29 @@ private fun MenuTab(canteenId: String, empty: Boolean) {
     LaunchedEffect(canteenId) {
         creating = false
         editing = null
+        fromAlert = false
         load()
+    }
+    // S5_ALERT 深链：菜品列表就绪后按 dishId 进编辑。
+    LaunchedEffect(openDishId, groups) {
+        val id = openDishId
+        if (id == null || deepLinked) return@LaunchedEffect
+        val found = groups.values.flatten().find { it.id == id }
+        if (found != null) {
+            editing = found
+            creating = false
+            fromAlert = true
+            deepLinked = true
+            onOpenConsumed()
+        }
     }
     if (creating || editing != null) {
         DishForm(
             initial = editing,
             canteenId = canteenId,
-            onBack = { creating = false; editing = null },
-            onSaved = { creating = false; editing = null; load() },
+            fromAlert = fromAlert,
+            onBack = { creating = false; editing = null; fromAlert = false },
+            onSaved = { creating = false; editing = null; fromAlert = false; load() },
         )
         return
     }
@@ -329,7 +354,7 @@ private fun MenuTab(canteenId: String, empty: Boolean) {
 
 /** 菜品表单：新建（默认启用 on）/ 编辑；编辑页 on→off 经确认直接保存，off→on 只改本地须点保存。 */
 @Composable
-private fun DishForm(initial: Dish?, canteenId: String, onBack: () -> Unit, onSaved: () -> Unit) {
+private fun DishForm(initial: Dish?, canteenId: String, fromAlert: Boolean, onBack: () -> Unit, onSaved: () -> Unit) {
     val scope = rememberCoroutineScope()
     var name by remember(initial?.id, canteenId) { mutableStateOf(initial?.name.orEmpty()) }
     var kind by remember(initial?.id, canteenId) { mutableStateOf(initial?.kind?.takeIf { it in KINDS } ?: "菜") }
@@ -370,6 +395,7 @@ private fun DishForm(initial: Dish?, canteenId: String, onBack: () -> Unit, onSa
     }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(if (initial == null) "新建菜品" else "编辑菜品", style = MaterialTheme.typography.titleLarge)
+        if (fromAlert) Text("从强提醒进入：请检查启用开关", color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("menu_form_from_alert"))
         if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("menu_form_error"))
         TextField(value = name, onValueChange = { name = it }, label = { Text("名称") }, modifier = Modifier.fillMaxWidth().testTag("menu_form_name"))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -586,16 +612,40 @@ private fun OptimizeTab(canteenId: String, empty: Boolean) {
     }
 }
 
+/** S5_MORE：各子项按权限码显隐，空组不出现。 */
 @Composable
-private fun MoreTab(onLogout: () -> Unit, onSwitchEmployee: () -> Unit) {
+private fun MoreTab(canteenId: String, empty: Boolean, onLogout: () -> Unit, onSwitchEmployee: () -> Unit, onGoToDish: (String) -> Unit) {
+    var route by remember { mutableStateOf("root") }
+    when (route) {
+        "alert" -> AlertTab(canteenId = canteenId, empty = empty, onBack = { route = "root" }, onGoToDish = { route = "root"; onGoToDish(it) })
+        "rating" -> RatingTab(canteenId = canteenId, empty = empty, onBack = { route = "root" })
+        "comment" -> CommentTab(canteenId = canteenId, empty = empty, onBack = { route = "root" })
+        "override" -> OverrideTab(canteenId = canteenId, empty = empty, onBack = { route = "root" })
+        "invite" -> InviteTab(onBack = { route = "root" })
+        else -> MoreRoot(canteenId = canteenId, onOpen = { route = it }, onLogout = onLogout, onSwitchEmployee = onSwitchEmployee)
+    }
+}
+
+@Composable
+private fun MoreRoot(canteenId: String, onOpen: (String) -> Unit, onLogout: () -> Unit, onSwitchEmployee: () -> Unit) {
     val me = Session.me.collectAsState().value
     val scope = rememberCoroutineScope()
-    val canEmployee = me?.permissions?.any { it == "meal.self_read" || it == "shift.self_write" } == true
+    val perms = me?.permissions.orEmpty()
+    val roles = me?.roles.orEmpty()
+    val isSuper = roles.any { it.role == "super_admin" }
+    val canAlert = isSuper || roles.any { it.role == "canteen" && it.canteen_ids.contains(canteenId) }
+    val canEmployee = perms.any { it == "meal.self_read" || it == "shift.self_write" }
+    val entries = buildList {
+        if (canAlert) add(Triple("alert", "强提醒", "more_entry_alert"))
+        if (perms.contains("rating.admin_read")) add(Triple("rating", "评分汇总", "more_entry_rating"))
+        if (perms.contains("comment.admin_read")) add(Triple("comment", "评语", "more_entry_comment"))
+        if (perms.contains("meal.admin_override")) add(Triple("override", "截止后改单", "more_entry_override"))
+        if (perms.contains("user.invite")) add(Triple("invite", "邀请码", "more_entry_invite"))
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("账户：${me?.personName().orEmpty()}", style = MaterialTheme.typography.titleMedium)
-        Text("以下入口下一 PR 接入（C4/C5）：", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("more_next"))
-        listOf("强提醒", "评分汇总", "评语", "截止后改单", "邀请码").forEach {
-            Text("$it（下一 PR）", color = Color(0xFF9CA3AF))
+        entries.forEach { (route, label, tag) ->
+            TextButton(onClick = { onOpen(route) }, modifier = Modifier.testTag(tag)) { Text(label) }
         }
         if (canEmployee) {
             TextButton(onClick = onSwitchEmployee, modifier = Modifier.testTag("canteen_to_employee")) { Text("切换到员工端") }
@@ -607,5 +657,448 @@ private fun MoreTab(onLogout: () -> Unit, onSwitchEmployee: () -> Unit) {
                 onLogout()
             }
         }, modifier = Modifier.testTag("canteen_logout")) { Text("退出登录") }
+    }
+}
+
+@Composable
+private fun SubBack(onBack: () -> Unit) {
+    TextButton(onClick = onBack, modifier = Modifier.testTag("more_back")) { Text("‹ 返回更多") }
+}
+
+/** C4 强提醒（S5_ALERT）：均分偏低列表；「去停用」深链进菜谱编辑，列表不直接下架。 */
+@Composable
+private fun AlertTab(canteenId: String, empty: Boolean, onBack: () -> Unit, onGoToDish: (String) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var groups by remember { mutableStateOf(emptyMap<String, List<AlertRow>>()) }
+    var threshold by remember { mutableStateOf(0.0) }
+    var kind by remember(canteenId) { mutableStateOf("菜") }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    fun load() {
+        scope.launch {
+            loading = true
+            try {
+                val body = Session.repo.alerts(canteenId)
+                groups = body.groups
+                threshold = body.threshold
+                error = null
+            } catch (e: Exception) {
+                error = e.message ?: "加载失败"
+            } finally {
+                loading = false
+            }
+        }
+    }
+    LaunchedEffect(canteenId) { load() }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SubBack(onBack)
+            Text("强提醒", style = MaterialTheme.typography.titleLarge)
+        }
+        if (empty || canteenId.isEmpty()) {
+            ScopeEmpty()
+            return@Column
+        }
+        Text("强提醒：以下菜品可见均分低于当前阈值。系统不自动下架，请人工核查。", color = Color(0xFFC62828))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("当前阈值 ≥ ${"%.2f".format(threshold)}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TextButton(onClick = { load() }, modifier = Modifier.testTag("alert_refresh")) { Text("刷新") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            KINDS.forEach {
+                TextButton(onClick = { kind = it }, modifier = Modifier.testTag("alert_kind_$it")) {
+                    Text(if (it == kind) "● $it" else it)
+                }
+            }
+        }
+        if (error != null) {
+            Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("alert_error"))
+            Button(onClick = { load() }, modifier = Modifier.testTag("alert_retry")) { Text("重试") }
+        }
+        if (loading) Text("加载中…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        (groups[kind].orEmpty()).forEach { row ->
+            Card(Modifier.fillMaxWidth().testTag("alert_row_${row.dish_id}")) {
+                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text(row.name, style = MaterialTheme.typography.titleMedium)
+                        Text(if (row.enabled) "已启用" else "已停用", color = if (row.enabled) Color(0xFF2D8A45) else Color(0xFF6B7280))
+                    }
+                    Text("样本量 ${row.sample_count} · 可见均分 ${"%.2f".format(row.visible_mean)} ↓", color = Color(0xFFE53935))
+                    Text(row.message.ifEmpty { "阈值以下菜品仍可继续出品，请人工评估后再处理。" }, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(onClick = { onGoToDish(row.dish_id) }, modifier = Modifier.testTag("alert_goto_${row.dish_id}")) { Text("去停用") }
+                }
+            }
+        }
+        if (!loading && error == null && groups[kind].isNullOrEmpty()) {
+            Text("暂无低于阈值的菜品", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** C4 评分汇总（S5_RATING）：只读。 */
+@Composable
+private fun RatingTab(canteenId: String, empty: Boolean, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var groups by remember { mutableStateOf(emptyMap<String, List<ScoreSummary>>()) }
+    var kind by remember(canteenId) { mutableStateOf("菜") }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    fun load() {
+        scope.launch {
+            loading = true
+            try {
+                groups = Session.repo.scoreSummaries(canteenId)
+                error = null
+            } catch (e: Exception) {
+                error = e.message ?: "加载失败"
+            } finally {
+                loading = false
+            }
+        }
+    }
+    LaunchedEffect(canteenId) { load() }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SubBack(onBack)
+            Text("评分汇总", style = MaterialTheme.typography.titleLarge)
+        }
+        if (empty || canteenId.isEmpty()) {
+            ScopeEmpty()
+            return@Column
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            KINDS.forEach {
+                TextButton(onClick = { kind = it }, modifier = Modifier.testTag("rating_kind_$it")) {
+                    Text(if (it == kind) "● $it" else it)
+                }
+            }
+        }
+        if (error != null) {
+            Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("rating_error"))
+            Button(onClick = { load() }, modifier = Modifier.testTag("rating_retry")) { Text("重试") }
+        }
+        if (loading) Text("加载中…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        (groups[kind].orEmpty()).forEach { row ->
+            Card(Modifier.fillMaxWidth().testTag("rating_row_${row.dish_id}")) {
+                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(row.name, style = MaterialTheme.typography.titleMedium)
+                    Text("可见均分 ${row.visible_mean?.let { "%.2f".format(it) } ?: "—"} · 样本量 ${row.sample_count}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("−2/−1/0/1/2：${row.counts["-2"] ?: 0} / ${row.counts["-1"] ?: 0} / ${row.counts["0"] ?: 0} / ${row.counts["1"] ?: 0} / ${row.counts["2"] ?: 0}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        if (!loading && error == null && groups[kind].isNullOrEmpty()) {
+            Text("这一组还没有评分", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** C4 评语（S5_COMMENT）：只读；匿名不展示账号；无删除。 */
+@Composable
+private fun CommentTab(canteenId: String, empty: Boolean, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var groups by remember { mutableStateOf(emptyMap<String, List<CommentRow>>()) }
+    var kind by remember(canteenId) { mutableStateOf("菜") }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    fun load() {
+        scope.launch {
+            loading = true
+            try {
+                groups = Session.repo.comments(canteenId)
+                error = null
+            } catch (e: Exception) {
+                error = e.message ?: "加载失败"
+            } finally {
+                loading = false
+            }
+        }
+    }
+    LaunchedEffect(canteenId) { load() }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SubBack(onBack)
+            Text("评语", style = MaterialTheme.typography.titleLarge)
+        }
+        if (empty || canteenId.isEmpty()) {
+            ScopeEmpty()
+            return@Column
+        }
+        Text("匿名评语不展示账号，评语不能删除。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            KINDS.forEach {
+                TextButton(onClick = { kind = it }, modifier = Modifier.testTag("comment_kind_$it")) {
+                    Text(if (it == kind) "● $it" else it)
+                }
+            }
+        }
+        if (error != null) {
+            Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("comment_error"))
+            Button(onClick = { load() }, modifier = Modifier.testTag("comment_retry")) { Text("重试") }
+        }
+        if (loading) Text("加载中…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        (groups[kind].orEmpty()).forEach { row ->
+            Card(Modifier.fillMaxWidth().testTag("comment_row_${row.comment_id}")) {
+                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("${row.dish_name} · ${row.kind} · ${row.meal_date} ${SLOT_NAMES[row.slot].orEmpty()}", style = MaterialTheme.typography.titleMedium)
+                    Text(row.body)
+                    Text(if (row.anonymous) "匿名" else (row.display_name?.trim()?.ifEmpty { null } ?: row.username.orEmpty()), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        if (!loading && error == null && groups[kind].isNullOrEmpty()) {
+            Text("这一类还没有评语", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** C5 截止后改单（S5_OVERRIDE）：载入 → 改 → 保存；失败保留参数可再存。 */
+@Composable
+private fun OverrideTab(canteenId: String, empty: Boolean, onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var date by remember(canteenId) { mutableStateOf(shanghaiToday()) }
+    var rows by remember { mutableStateOf<List<AdminMealRow>>(emptyList()) }
+    var locked by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(false) }
+    var savingId by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    fun load() {
+        scope.launch {
+            loading = true
+            try {
+                val body = Session.repo.adminMeals(date, canteenId)
+                rows = body.items
+                locked = body.locked
+                error = null
+            } catch (e: Exception) {
+                error = e.message ?: "加载失败"
+            } finally {
+                loading = false
+            }
+        }
+    }
+    LaunchedEffect(canteenId, date) { load() }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SubBack(onBack)
+            Text("截止后改单", style = MaterialTheme.typography.titleLarge)
+        }
+        if (empty || canteenId.isEmpty()) {
+            ScopeEmpty()
+            return@Column
+        }
+        Text("截止后仅管理员可改。${if (locked) "该日已锁定。" else "未锁定时员工仍可自己改。"}", color = Color(0xFF246E37))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+            TextButton(onClick = { date = addDays(date, -1) }, modifier = Modifier.testTag("override_prev_day")) { Text("‹") }
+            Text(date, modifier = Modifier.testTag("override_date"))
+            TextButton(onClick = { date = addDays(date, 1) }, modifier = Modifier.testTag("override_next_day")) { Text("›") }
+        }
+        if (error != null) {
+            Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("override_error"))
+            Button(onClick = { load() }, modifier = Modifier.testTag("override_retry")) { Text("重试") }
+        }
+        if (loading) Text("加载中…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        rows.forEach { row ->
+            Card(Modifier.fillMaxWidth().testTag("override_row_${row.account_id}_${row.slot}")) {
+                Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                    Column(Modifier.weight(1f)) {
+                        Text(row.display_name?.trim()?.ifEmpty { null } ?: row.username, style = MaterialTheme.typography.titleMedium)
+                        Text("${SLOT_NAMES[row.slot].orEmpty()} · ${if (row.ordering) "报" else "不报"} · ${if (row.locked_at != null) "已锁定" else "未锁定"}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                savingId = "${row.account_id}/${row.slot}"
+                                error = null
+                                try {
+                                    Session.repo.adminPutMeal(row.account_id, row.date, row.slot, !row.ordering, canteenId)
+                                    val body = Session.repo.adminMeals(date, canteenId)
+                                    rows = body.items
+                                    locked = body.locked
+                                } catch (e: Exception) {
+                                    error = e.message ?: "保存失败"
+                                } finally {
+                                    savingId = null
+                                }
+                            }
+                        },
+                        enabled = savingId == null,
+                        modifier = Modifier.testTag("override_toggle_${row.account_id}_${row.slot}"),
+                    ) { Text(if (savingId == "${row.account_id}/${row.slot}") "保存中…" else if (row.ordering) "改为不报" else "改为报") }
+                }
+            }
+        }
+        if (!loading && error == null && rows.isEmpty()) {
+            Text("该日暂无报餐记录", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** C5 邀请码（S6_*）：创建后明文只展示一次；作废需确认；改次数 ≥ 已用。 */
+@Composable
+private fun InviteTab(onBack: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var rows by remember { mutableStateOf<List<Invite>>(emptyList()) }
+    var canteens by remember { mutableStateOf<List<Canteen>>(emptyList()) }
+    var role by remember { mutableStateOf("employee") }
+    var scopeIds by remember { mutableStateOf(setOf<String>()) }
+    var maxUsesText by remember { mutableStateOf("1") }
+    var creating by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var shown by remember { mutableStateOf<String?>(null) }
+    var dialog by remember { mutableStateOf(false) }
+    var editTarget by remember { mutableStateOf<Invite?>(null) }
+    var editText by remember { mutableStateOf("") }
+    var revokeTarget by remember { mutableStateOf<Invite?>(null) }
+    val names = canteens.associate { it.id to it.name }
+    fun load() {
+        scope.launch {
+            try {
+                rows = Session.repo.invites()
+                canteens = Session.repo.allCanteens()
+            } catch (e: Exception) {
+                error = e.message ?: "加载失败"
+            }
+        }
+    }
+    LaunchedEffect(Unit) { load() }
+    fun statusOf(inv: Invite): Pair<String, Color> = when {
+        inv.revoked_at != null -> "已作废" to Color(0xFF6B7280)
+        inv.used_count >= inv.max_uses -> "已用完 ${inv.used_count}/${inv.max_uses}" to Color(0xFF6B7280)
+        inv.used_count > 0 -> "使用中 ${inv.used_count}/${inv.max_uses}" to Color(0xFFB45309)
+        else -> "未使用 0/${inv.max_uses}" to Color(0xFF2D8A45)
+    }
+    if (dialog && shown != null) {
+        AlertDialog(
+            onDismissRequest = { dialog = false; shown = null },
+            title = { Text("邀请码展示") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(shown!!, modifier = Modifier.testTag("invite_code"))
+                    Text("完整码仅显示一次，离开后列表不再显示全文", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            confirmButton = { TextButton(onClick = { dialog = false; shown = null }, modifier = Modifier.testTag("invite_close")) { Text("关闭") } },
+        )
+    }
+    editTarget?.let { inv ->
+        AlertDialog(
+            onDismissRequest = { editTarget = null },
+            title = { Text("修改可用次数") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("已用 ${inv.used_count} 次，可改成不小于 ${inv.used_count} 的次数（改到等于已用即立即用尽）")
+                    TextField(value = editText, onValueChange = { editText = it }, label = { Text("可用次数") }, modifier = Modifier.testTag("invite_edit_field"))
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            val n = editText.trim().toIntOrNull() ?: 0
+                            try {
+                                Session.repo.updateInviteMaxUses(inv.id, n)
+                                editTarget = null
+                                load()
+                            } catch (e: Exception) {
+                                error = e.message ?: "修改失败"
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("invite_edit_save"),
+                ) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { editTarget = null }) { Text("取消") } },
+        )
+    }
+    revokeTarget?.let { inv ->
+        AlertDialog(
+            onDismissRequest = { revokeTarget = null },
+            title = { Text("作废邀请码") },
+            text = { Text("作废后该邀请码不能再用于注册，是否继续？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        revokeTarget = null
+                        scope.launch {
+                            try {
+                                Session.repo.revokeInvite(inv.id)
+                                load()
+                            } catch (e: Exception) {
+                                error = e.message ?: "作废失败"
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("invite_confirm_revoke"),
+                ) { Text("确认作废") }
+            },
+            dismissButton = { TextButton(onClick = { revokeTarget = null }) { Text("取消") } },
+        )
+    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SubBack(onBack)
+            Text("邀请码", style = MaterialTheme.typography.titleLarge)
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { role = "employee" }, modifier = Modifier.testTag("invite_role_employee")) { Text(if (role == "employee") "● 员工" else "员工") }
+                TextButton(onClick = { role = "canteen" }, modifier = Modifier.testTag("invite_role_canteen")) { Text(if (role == "canteen") "● 食堂" else "食堂") }
+            }
+            TextField(value = maxUsesText, onValueChange = { maxUsesText = it }, label = { Text("可用次数") }, modifier = Modifier.fillMaxWidth().testTag("invite_max_uses"))
+            Button(onClick = {
+                scope.launch {
+                    creating = true
+                    error = null
+                    try {
+                        val n = maxUsesText.trim().toIntOrNull() ?: 0
+                        val created = Session.repo.createInvite(n, role, if (role == "canteen") scopeIds.toList() else emptyList())
+                        shown = created.code
+                        dialog = true
+                        load()
+                    } catch (e: Exception) {
+                        error = e.message ?: "发放失败"
+                    } finally {
+                        creating = false
+                    }
+                }
+            }, enabled = !creating, modifier = Modifier.testTag("invite_create")) { Text("发放邀请码") }
+        }
+        if (role == "canteen") {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("食堂范围（至少选一个）", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                canteens.forEach { c ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = scopeIds.contains(c.id), onCheckedChange = { on ->
+                            scopeIds = if (on) scopeIds + c.id else scopeIds - c.id
+                        }, modifier = Modifier.testTag("invite_scope_${c.id}"))
+                        Text(c.name)
+                    }
+                }
+            }
+        }
+        if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("invite_error"))
+        rows.forEach { inv ->
+            val (status, color) = statusOf(inv)
+            Card(Modifier.fillMaxWidth().testTag("invite_row_${inv.id}")) {
+                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("完整码只在发放时出现一次", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${if (inv.role == "canteen") "食堂" else "员工"} · 范围 ${if (inv.role != "canteen" || inv.canteen_ids.isEmpty()) "—" else inv.canteen_ids.map { names[it] ?: it }.joinToString("、")} · ${inv.used_count}/${inv.max_uses}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(status, color = color)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = { editTarget = inv; editText = inv.max_uses.toString() },
+                            enabled = inv.revoked_at == null,
+                            modifier = Modifier.testTag("invite_edit_${inv.id}"),
+                        ) { Text("改次数") }
+                        TextButton(
+                            onClick = { revokeTarget = inv },
+                            enabled = inv.revoked_at == null,
+                            modifier = Modifier.testTag("invite_revoke_${inv.id}"),
+                        ) { Text("作废") }
+                    }
+                }
+            }
+        }
     }
 }
