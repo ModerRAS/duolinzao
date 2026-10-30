@@ -76,8 +76,9 @@ export async function ensureLoggedIn(page: Page) {
   if (saved) {
     currentUser = saved;
     await page.goto("/");
-    await page.getByRole("button", { name: /密码登录（兜底）/ }).click();
     await page.getByPlaceholder("账号").fill(currentUser);
+    await page.getByRole("button", { name: "下一步" }).click();
+    await page.getByRole("button", { name: /使用账号密码登录/ }).click();
     await page.getByPlaceholder("密码").fill(password);
     await page.getByRole("button", { name: "登录", exact: true }).click();
     try {
@@ -94,8 +95,9 @@ export async function ensureLoggedIn(page: Page) {
 export async function loginAs(page: Page, username: string, pwd: string) {
   await page.context().clearCookies();
   await page.goto("/");
-  await page.getByRole("button", { name: /密码登录（兜底）/ }).click();
   await page.getByPlaceholder("账号").fill(username);
+  await page.getByRole("button", { name: "下一步" }).click();
+  await page.getByRole("button", { name: /使用账号密码登录/ }).click();
   await page.getByPlaceholder("密码").fill(pwd);
   await page.getByRole("button", { name: "登录", exact: true }).click();
 }

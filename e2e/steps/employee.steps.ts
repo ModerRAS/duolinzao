@@ -66,7 +66,7 @@ Given("系统已部署并可访问", async ({ page }) => {
   lastSlot = null;
   weekAdvanced = false;
   await page.goto("/");
-  await expect(page.getByRole("button", { name: /密码登录（兜底）/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /使用 Passkey 登录/ })).toBeVisible();
 });
 
 // 背景：邀请码与食堂由 scripts/e2e.sh 调 e2e/seed.sql 预置，这里只确认配置存在。
@@ -117,20 +117,21 @@ When("打开登录页", async ({ page }) => {
 });
 
 Then("登录入口按 Passkey、TOTP、邮箱验证码、密码顺序展示", async ({ page }) => {
-  // 开启态自包含：先开邮箱再断言四入口顺序，不依赖其它场景的开关状态。
+  // Google 流：首页 Passkey；填账号下一步后选方式（密码 / 验证码 / 邮箱）。
   const s = await rootSession();
   await s.call("/api/admin/settings/email", { method: "PUT", body: { enabled: true } });
   await page.goto("/");
+  await expect(page.getByRole("button", { name: /使用 Passkey 登录/ })).toBeVisible();
+  await page.getByPlaceholder("账号").fill("e2e_order_probe");
+  await page.getByRole("button", { name: "下一步" }).click();
   const texts = await page.getByRole("button").allTextContents();
   const flat = texts.join("\n");
-  const passkey = flat.indexOf("使用 Passkey 登录");
-  const totp = flat.indexOf("使用 TOTP");
-  const otp = flat.indexOf("邮箱验证码");
-  const pwd = flat.indexOf("密码登录（兜底）");
-  expect(passkey).toBeGreaterThanOrEqual(0);
-  expect(totp).toBeGreaterThan(passkey);
+  const pwd = flat.indexOf("使用账号密码登录");
+  const totp = flat.indexOf("Authenticator");
+  const otp = flat.indexOf("邮箱登录");
+  expect(pwd).toBeGreaterThanOrEqual(0);
+  expect(totp).toBeGreaterThan(pwd);
   expect(otp).toBeGreaterThan(totp);
-  expect(pwd).toBeGreaterThan(otp);
 });
 
 Then("不做短信 OTP", async ({ page }) => {
@@ -142,7 +143,11 @@ Then("若总管已关闭邮箱能力则不出现邮箱验证码", async ({ page 
   const s = await rootSession();
   await s.call("/api/admin/settings/email", { method: "PUT", body: { enabled: false } });
   await page.goto("/");
-  await expect(page.getByText("邮箱能力关闭，不显示邮箱验证码")).toBeVisible();
+  // Google 流：关邮箱后 methods 屏不再出现「邮箱登录」入口（无「能力关闭」提示文案）。
+  await page.getByPlaceholder("账号").fill("e2e_order_probe");
+  await page.getByRole("button", { name: "下一步" }).click();
+  await expect(page.getByRole("heading", { name: "选择登录方式" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /邮箱登录/ })).toHaveCount(0);
   await expect(page.getByText("邮箱验证码", { exact: true })).toHaveCount(0);
 });
 

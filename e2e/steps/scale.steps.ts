@@ -82,8 +82,9 @@ const denial: Record<string, { status: number; error?: string }> = {};
 async function loginEmp(page: Page, user: string, pass: string) {
   await page.context().clearCookies();
   await page.goto("/");
-  await page.getByRole("button", { name: /密码登录（兜底）/ }).click();
   await page.getByPlaceholder("账号").fill(user);
+  await page.getByRole("button", { name: "下一步" }).click();
+  await page.getByRole("button", { name: /使用账号密码登录/ }).click();
   await page.getByPlaceholder("密码").fill(pass);
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page.locator(".emp")).toBeVisible({ timeout: 15000 });

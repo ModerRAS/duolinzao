@@ -383,10 +383,11 @@ Then("可查看本账号设备、踢掉设备、解绑 Passkey", async ({ page }
   ctxB = await browser!.newContext({ baseURL });
   pageB = await ctxB.newPage();
   await pageB.goto("/");
-  await pageB.getByRole("button", { name: /密码登录（兜底）/ }).click();
   const me = await page.request.get("/api/me").then((r) => r.json());
   // B 用同一账号登录：用户名取自 A 的会话。
   await pageB.getByPlaceholder("账号").fill(me.username);
+  await pageB.getByRole("button", { name: "下一步" }).click();
+  await pageB.getByRole("button", { name: /使用账号密码登录/ }).click();
   await pageB.getByPlaceholder("密码").fill("E2e-passw0rd!");
   // 共享账号文件里的密码固定为 E2e-passw0rd!（helpers 注册用）；若当前账号是别处注册的，用 API 兜底确认。
   await pageB.getByRole("button", { name: "登录", exact: true }).click();
@@ -425,8 +426,9 @@ When("新设备 B 发起登录并生成待确认请求", async ({ page }) => {
   pageC = await ctxC.newPage();
   await pageC.goto("/");
   await pageC.getByPlaceholder("账号").fill(me.username);
-  await pageC.getByRole("button", { name: "新设备等待页内确认" }).click();
-  await pageC.getByRole("button", { name: "请已登录设备确认" }).click();
+  await pageC.getByRole("button", { name: "下一步" }).click();
+  await pageC.getByRole("button", { name: /新设备确认/ }).click();
+  await pageC.getByRole("button", { name: "重新发起确认" }).click();
   await expect(pageC.getByText("等待确认")).toBeVisible({ timeout: 10000 });
 });
 
@@ -466,8 +468,9 @@ When("另一次请求在已登录设备上被拒绝", async ({ page }) => {
   pageD = await ctxD.newPage();
   await pageD.goto("/");
   await pageD.getByPlaceholder("账号").fill(me.username);
-  await pageD.getByRole("button", { name: "新设备等待页内确认" }).click();
-  await pageD.getByRole("button", { name: "请已登录设备确认" }).click();
+  await pageD.getByRole("button", { name: "下一步" }).click();
+  await pageD.getByRole("button", { name: /新设备确认/ }).click();
+  await pageD.getByRole("button", { name: "重新发起确认" }).click();
   await expect(pageD.getByText("等待确认")).toBeVisible({ timeout: 10000 });
   await page.reload();
   await openTab(page, "我的");
@@ -591,7 +594,7 @@ When("把密码改回并退出登录", async ({ page }) => {
 });
 
 Then("回到登录页", async ({ page }) => {
-  await expect(page.getByRole("button", { name: /密码登录（兜底）/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /使用 Passkey 登录/ })).toBeVisible();
   await accountCtx?.close();
   accountCtx = null;
   accountPage = null;

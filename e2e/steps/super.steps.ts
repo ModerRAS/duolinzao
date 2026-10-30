@@ -330,13 +330,19 @@ When("打开邮箱设置独立页并关闭邮箱能力", async ({ page }) => {
 Then("全站登录不再出现邮箱验证码", async ({ page }) => {
   await page.context().clearCookies();
   await page.goto("/");
-  await expect(page.getByText("邮箱能力关闭，不显示邮箱验证码")).toBeVisible();
+  // Google 流：关邮箱后 methods 屏不再出现「邮箱登录」入口（无「能力关闭」提示文案）。
+  await page.getByPlaceholder("账号").fill("e2e_super_order_probe");
+  await page.getByRole("button", { name: "下一步" }).click();
+  await expect(page.getByRole("heading", { name: "选择登录方式" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /邮箱登录/ })).toHaveCount(0);
   await expect(page.getByText("邮箱验证码", { exact: true })).toHaveCount(0);
 });
 
 Then("不强制验证邮箱", async ({ page }) => {
-  // 注册表单无邮箱必填项。
+  // 注册入口只在登录首页；上一断言停在 methods 屏，先回首页。
+  await page.goto("/");
   await page.getByRole("button", { name: "有邀请码，去注册" }).click();
+  await expect(page.getByRole("heading", { name: "注册" })).toBeVisible();
   await expect(page.getByPlaceholder("账号")).toBeVisible();
   await expect(page.getByPlaceholder(/邮箱/)).toHaveCount(0);
 });
@@ -357,14 +363,16 @@ When("再次开启邮箱能力", async () => {
 Then("邮箱验证码入口在优先级中位于 TOTP 与密码之间", async ({ page }) => {
   await page.context().clearCookies();
   await page.goto("/");
+  await page.getByPlaceholder("账号").fill("e2e_super_order_probe");
+  await page.getByRole("button", { name: "下一步" }).click();
   const texts = await page.getByRole("button").allTextContents();
   const flat = texts.join("\n");
-  const totp = flat.indexOf("使用 TOTP");
-  const otp = flat.indexOf("邮箱验证码");
-  const pwd = flat.indexOf("密码登录（兜底）");
-  expect(totp).toBeGreaterThanOrEqual(0);
+  const pwd = flat.indexOf("使用账号密码登录");
+  const totp = flat.indexOf("Authenticator");
+  const otp = flat.indexOf("邮箱登录");
+  expect(pwd).toBeGreaterThanOrEqual(0);
+  expect(totp).toBeGreaterThan(pwd);
   expect(otp).toBeGreaterThan(totp);
-  expect(pwd).toBeGreaterThan(otp);
   // 还原关闭，避免影响其它场景（员工登录优先级期望关闭态）。
   const s = await rootSession();
   await s.call("/api/admin/settings/email", { method: "PUT", body: { enabled: false } });
