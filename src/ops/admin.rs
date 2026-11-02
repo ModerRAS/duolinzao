@@ -545,7 +545,7 @@ pub async fn recover(
         "reset_password" => {
             let password = password.unwrap_or_default();
             super::ensure_password(&password)?;
-            let hash = hash_password(&password)?;
+            let hash = hash_password(&password).await?;
             sqlx::query("UPDATE account SET password_hash = $1 WHERE id = $2")
                 .bind(hash)
                 .bind(account_id)

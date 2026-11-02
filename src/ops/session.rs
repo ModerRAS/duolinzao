@@ -74,7 +74,7 @@ pub async fn bootstrap(state: &AppState) -> Result<(), AppError> {
     let account_id = if let Some(id) = existing {
         id
     } else {
-        let password_hash = hash_password(&state.config.super_password)?;
+        let password_hash = hash_password(&state.config.super_password).await?;
         sqlx::query_scalar(
             r#"
             INSERT INTO account (username, password_hash, created_at)
@@ -167,7 +167,7 @@ pub async fn register(
     if taken {
         return Err(AppError::conflict("username_taken", "账号已被占用"));
     }
-    let password_hash = hash_password(password)?;
+    let password_hash = hash_password(password).await?;
     let account_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO account (username, password_hash, created_at)
@@ -264,11 +264,14 @@ pub async fn login_password(
         .bind(username)
         .fetch_optional(&state.pool)
         .await?;
-    let ok = row
+    let ok = if let Some(hash) = row
         .as_ref()
         .and_then(|item| item.get::<Option<String>, _>("password_hash"))
-        .map(|hash| verify_password(password, &hash))
-        .unwrap_or(false);
+    {
+        verify_password(password, &hash).await?
+    } else {
+        false
+    };
     record_login(&state.pool, username, ip, ok, now).await?;
     if !ok {
         let _ = audit(
@@ -402,7 +405,7 @@ pub async fn change_password(
             "这个账号还没有密码，请联系总管找回",
         ));
     };
-    if !verify_password(current_password, &hash) {
+    if !verify_password(current_password, &hash).await? {
         drop(tx);
         record_login(&state.pool, &user.username, ip, false, now).await?;
         return Err(AppError::bad("password_incorrect", "当前密码不正确"));
@@ -411,7 +414,7 @@ pub async fn change_password(
         return Err(AppError::bad("password_unchanged", "新密码与当前密码相同"));
     }
     ensure_password(new_password)?;
-    let new_hash = hash_password(new_password)?;
+    let new_hash = hash_password(new_password).await?;
     sqlx::query("UPDATE account SET password_hash = $1 WHERE id = $2")
         .bind(new_hash)
         .bind(user.account_id)
