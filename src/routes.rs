@@ -59,6 +59,10 @@ pub fn router(state: AppState) -> Router {
         // 站点自托管 `/app/`：通用 APK 与 version.json。显式路由优先于文末的
         // SPA fallback，缺文件时返回 404 JSON（不回退 index.html，见设计 §4.4）。
         .route("/app/*path", get(serve_app_file))
+        // Android 资产链接声明：免登录（系统与校验方需公开拉取），
+        // 指纹来自 `{app_dir}/version.json` 的 `cert_sha256`（签名发布时由 apksigner 回填）；
+        // 未签名/无指纹/缺文件一律 404 JSON，绝不回退 index.html（回退会吞成 200+HTML，声明失效）。
+        .route("/.well-known/assetlinks.json", get(assetlinks))
         .route("/api/session/passkey/start", post(passkey_start))
         .route("/api/session/passkey/finish", post(passkey_finish))
         .route("/api/passkeys/register/start", post(passkey_register_start))
@@ -260,6 +264,53 @@ async fn serve_app_file(
             (header::CACHE_CONTROL, cache),
         ],
         bytes,
+    )
+        .into_response()
+}
+
+/// Android 资产链接声明（免登录）：读 `{app_dir}/version.json` 的 `cert_sha256`，
+/// 为包 `com.duolinzao.app` 声明 `get_login_creds`（通行密钥归属）与 `handle_all_urls`；
+/// 未签名/无指纹/缺文件/路径逃逸一律 404 JSON，绝不回退 index.html。
+async fn assetlinks(State(state): State<AppState>) -> impl IntoResponse {
+    let not_found = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "not_found", "message": "不存在"})),
+        )
+            .into_response()
+    };
+    let Some(dir) = state.config.resolved_app_dir() else {
+        return not_found();
+    };
+    let fingerprint: Option<String> =
+        std::fs::read_to_string(format!("{dir}/version.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|meta| {
+                meta.get("cert_sha256")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .filter(|item| item.len() == 64 && item.chars().all(|c| c.is_ascii_hexdigit()));
+    let Some(fingerprint) = fingerprint else {
+        return not_found();
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Json(json!([{
+            "relation": [
+                "delegate_permission/common.handle_all_urls",
+                "delegate_permission/common.get_login_creds",
+            ],
+            "target": {
+                "namespace": "android_app",
+                "package_name": "com.duolinzao.app",
+                "sha256_cert_fingerprints": [fingerprint],
+            },
+        }])),
     )
         .into_response()
 }

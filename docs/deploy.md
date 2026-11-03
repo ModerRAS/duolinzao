@@ -202,6 +202,10 @@ rm -rf <STAGING_DEPLOY_PATH>/pgdata <STAGING_DEPLOY_PATH>/images
 经 `local_key` AES-GCM 加密），由超管在「应用签名」页上传/替换、点「签名发布」。
 密钥不进 git、不进 GitHub Secrets、不进部署机文件。
 
+staging 域名必填：CI 打 staging 包要求仓库级 var `STAGING_DLZ_DOMAIN` 已配置为测试服域名
+（与 §2.1 变量表一致）；缺失时 android-apk job 直接失败，绝不写出 `example.com` 占位包
+（占位包连不上服务器、通行密钥仪式也起不来）。
+
 每次 CI（PR 照跑）`android-apk` job 自动：未签通用包 → 按域名各出一份 →
 打进服务端镜像 → `/app/*` 直出（此时是未签包 + `"signing":"unsigned"` 的临时
 `version.json`）。App 只拉**当前 baseUrl 同源**的 `/app/version.json`
@@ -266,8 +270,8 @@ DB 尚未配置 keystore 时：staging/CI 保持绿（`/app/*` 是 CI 未签包�
 
 ### 7.5 首次装包
 
-- 生产手机浏览器打开 `https://example.com/app/duolinzao.apk`（把域名换成自己的）
-  下载安装；之后 App 内「检查更新」会自动提示。
+- 超管登录站点 → 「应用签名」页（已发布后出现下载卡）→ 「下载 APK」或「复制下载链接」发给用户；
+  之后 App 内「检查更新」会自动提示。
 - 镜像体积：两份 APK 都是 MB 级（具体数字见 PR 描述），加上 JRE + build-tools
  （服务端签名用，约数百 MB）；**没开 R8/混淆**（会改 App 行为），除非确认安全才考虑。
 

@@ -352,6 +352,45 @@ pub async fn put_keystore(
     Ok(status_body(true, Some(&alias), Some(&fingerprint), None, published_release(state)))
 }
 
+/// 签名证书 SHA-256（assetlinks 用）：`apksigner verify --print-certs` 取
+/// 首个 `certificate SHA-256 digest` 行（keytool 的 `SHA256:` 冒号形式也认），
+/// 归一化为 64 位大写 hex（冒号/空格去掉）。
+/// 供 `/.well-known/assetlinks.json` 做 Android 应用归属声明（通行密钥等需它）。
+fn parse_cert_sha256(text: &str) -> Option<String> {
+    for line in text.lines() {
+        // apksigner：`... SHA-256 digest: <hex>`；keytool：`SHA256: <AA:BB:…>`。
+        let digest = line
+            .split_once("SHA-256 digest:")
+            .map(|(_, rest)| rest)
+            .or_else(|| line.split_once("SHA256:").map(|(_, rest)| rest));
+        let Some(digest) = digest else { continue };
+        let normalized: String = digest
+            .chars()
+            .filter(|item| item.is_ascii_hexdigit())
+            .map(|item| item.to_ascii_uppercase())
+            .collect();
+        if normalized.len() == 64 {
+            return Some(normalized);
+        }
+    }
+    None
+}
+
+/// 对已签名包跑 `apksigner verify --print-certs` 取证书指纹；
+/// 取不到返回 None（测试 shim/旧 apksigner 无输出时调用方记 warn 后继续发版）。
+fn signer_cert_sha256(signer: &Path, apk: &Path) -> Option<String> {
+    let out = Command::new(signer)
+        .arg("verify")
+        .arg("--print-certs")
+        .arg(apk)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_cert_sha256(&String::from_utf8_lossy(&out.stdout))
+}
+
 /// 已有 keystore 时的纯签名发布：给当前镜像里的未签包签名并写出正式 version.json。
 /// 与 HTTP「签名发布」同一代码路径，启动钩子复用；调用方负责鉴权/审计与空库策略。
 /// 密码只走进程环境进 apksigner（argv/`ps` 不可见），永不进日志与审计。
@@ -426,6 +465,12 @@ async fn sign_staged(state: &AppState, signing: &SigningRow) -> Result<Value, Ap
     let bytes = std::fs::read(&out_path).map_err(|_| AppError::internal())?;
     let sha256 = hex::encode(Sha256::digest(&bytes));
     std::fs::rename(&out_path, &staged_apk).map_err(|_| AppError::internal())?;
+    // assetlinks 用证书指纹：取不到只记 warn（测试 shim/旧 apksigner 无输出），发版继续；
+    // version.json 缺 cert_sha256 时 `/.well-known/assetlinks.json` 直接 404（安全方向：不声明错归属）。
+    let cert_sha256 = signer_cert_sha256(&signer, Path::new(&staged_apk));
+    if cert_sha256.is_none() {
+        tracing::warn!("apk cert fingerprint unavailable; assetlinks will 404 until re-signed");
+    }
     let version_code = staged_meta.get("versionCode").cloned().unwrap_or(json!(0));
     let version_name = staged_meta
         .get("versionName")
@@ -442,6 +487,7 @@ async fn sign_staged(state: &AppState, signing: &SigningRow) -> Result<Value, Ap
                 "url": url,
                 "sha256": sha256,
                 "signing": "release",
+                "cert_sha256": cert_sha256,
             })
         ),
     )
@@ -452,6 +498,7 @@ async fn sign_staged(state: &AppState, signing: &SigningRow) -> Result<Value, Ap
         "url": url,
         "sha256": sha256,
         "signing": "release",
+        "cert_sha256": cert_sha256,
     }))
 }
 
@@ -601,5 +648,31 @@ mod tests {
         assert!(!needs_sign(&json!({"versionCode": 7, "signing": "release"})));
         assert!(!needs_sign(&json!({"versionCode": 0, "signing": "unsigned"})));
         assert!(!needs_sign(&json!({})));
+    }
+
+    #[test]
+    fn cert_fingerprint_parses_apksigner_output() {
+        // 64 位 hex：0123456789abcdef 重复 4 次。
+        let lower = "0123456789abcdef".repeat(4);
+        let upper = "0123456789ABCDEF".repeat(4);
+        assert_eq!(lower.len(), 64);
+        let sample = format!(
+            "Verifies\nSigner #1 certificate DN: CN=duolinzao\nSigner #1 certificate SHA-256 digest: {lower}\n"
+        );
+        assert_eq!(parse_cert_sha256(&sample).as_deref(), Some(upper.as_str()));
+        // keytool 风格冒号分隔同样归一化。
+        let colon = lower
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(2)
+            .map(|pair| pair.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join(":");
+        assert_eq!(
+            parse_cert_sha256(&format!("SHA256: {colon}")).as_deref(),
+            Some(upper.as_str())
+        );
+        assert_eq!(parse_cert_sha256("no digest here"), None);
+        assert_eq!(parse_cert_sha256("SHA-256 digest: abc"), None);
     }
 }

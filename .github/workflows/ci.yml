@@ -237,8 +237,10 @@ jobs:
           fi
           STAGING_URL="https://${STAGING_DOMAIN:-}"
           if [ -z "${STAGING_DOMAIN:-}" ]; then
-            echo "::notice::仓库级 var STAGING_DLZ_DOMAIN 未设，staging 包用 https://example.com 占位"
-            STAGING_URL="https://example.com"
+            # 缺 staging 域名绝不写 example.com 占位包：那样的包连不上服务器、通行密钥仪式也起不来。
+            # fork/新环境先在仓库 Settings → Variables 配好 STAGING_DLZ_DOMAIN 再跑。
+            echo "::error::仓库级 var STAGING_DLZ_DOMAIN 未设，拒绝打 staging 包（会写出连不上的 example.com 占位包）。请在仓库 Settings → Variables 配置 staging 域名再跑（见部署文档 §7）"
+            exit 1
           fi
           rm -rf app-bundle && mkdir -p app-bundle/prod app-bundle/staging
           bash clients/android/scripts/inject-server-url.sh "$PROD_URL" "$UNIVERSAL" app-bundle/prod/duolinzao.apk

@@ -308,13 +308,14 @@ APK 内例如 `assets/server.json`：
 客户端：
 
 1. 启动时及「我的 → 检查更新」时请求 `GET {baseUrl}/app/version.json`（仅同源）。
-2. 格式：`{ "versionCode", "versionName", "url", "sha256" }`；`url` 必须与 baseUrl 同源（一般为 `/app/duolinzao.apk`）。
+2. 格式：`{ "versionCode", "versionName", "url", "sha256" }`，签名发布后追加 `"cert_sha256"`（签名证书 SHA-256，大写 64 位 hex，供 assetlinks）；`url` 必须与 baseUrl 同源（一般为 `/app/duolinzao.apk`）。
 3. `versionCode` 大于本机时提示更新；下载后校验 **sha256**、**包名**与**签名证书指纹**（与当前安装包一致）均通过才调起系统安装。
 4. 任一校验失败则丢弃安装包并提示，不安装。
 
 服务端需配套的工作：
 
 1. 站点托管 `/app/` 静态目录：`/app/duolinzao.apk` 与 `/app/version.json`（可走现有静态文件服务或独立静态路由；需确保 `/app/*` 不被 SPA 回退到 `index.html`，缺失文件应返回 404）。
+2. 应用归属声明：后端显式路由 `GET /.well-known/assetlinks.json`（免登录），指纹取 `{app_dir}/version.json` 的 `cert_sha256`（签名发布时由 `apksigner verify --print-certs` 回填）；未签名/无指纹时返回 404，绝不回退 SPA。`package_name` 为 `com.duolinzao.app`，relation 同时声明 `handle_all_urls` 与 `get_login_creds`（后者供通行密钥归属校验）。
 2. `version.json` 由 inject / 重签步骤生成：`versionCode` / `versionName` 从通用 APK 原样读取（部署方不覆盖），并写入 `url`、`sha256`。
 3. 响应头：`version.json` 不缓存或短缓存；APK 使用正确的 `Content-Type`（`application/vnd.android.package-archive`）。
 4. 部署文档说明 `/app/` 目录的挂载 / 上传方式（具体路径、域名属部署私有信息，不入仓）。

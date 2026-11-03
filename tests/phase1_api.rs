@@ -30,6 +30,12 @@ const PNG: &[u8] = &[
 
 const EDGE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0";
 
+/// 测试夹具路径塞进 TOML：Windows 反斜杠在 basic string 里是转义符，统一换成正斜杠
+///（Linux 下 replace 是空操作；std::fs 在 Windows 也接受 `/`）。
+fn win_path(path: &std::path::Path) -> String {
+    path.to_str().unwrap().replace('\\', "/")
+}
+
 struct Resp {
     status: StatusCode,
     bytes: Vec<u8>,
@@ -309,7 +315,7 @@ async fn prepare() -> Api {
     let image_dir = std::env::temp_dir().join("duolinzao-phase1-images");
     let _ = std::fs::remove_dir_all(&image_dir);
     std::fs::create_dir_all(&image_dir).unwrap();
-    let raw = example_config().replace("/tmp/duolinzao-images", image_dir.to_str().unwrap());
+    let raw = example_config().replace("/tmp/duolinzao-images", &win_path(&image_dir));
     let config = AppConfig::parse(&raw).unwrap();
     let mailer = Arc::new(CapturingMailer::new());
     let scripts = ScriptedBackend::failing_then_script();
@@ -2661,7 +2667,7 @@ async fn app_static_no_spa_fallback() {
     std::fs::write(app_dir.join("app/duolinzao.apk"), b"fakepk").unwrap();
     let raw_cfg = example_config().replace(
         "[server]",
-        &format!("[server]\nstatic_dir = \"{}\"", app_dir.to_str().unwrap()),
+        &format!("[server]\nstatic_dir = \"{}\"", win_path(&app_dir)),
     );
     let config = AppConfig::parse(&raw_cfg).unwrap();
     let state = AppState::new(
@@ -2761,8 +2767,8 @@ async fn app_static_custom_app_dir() {
         "[server]",
         &format!(
             "[server]\nstatic_dir = \"{}\"\napp_dir = \"{}\"",
-            base.join("static").to_str().unwrap(),
-            base.join("custom").to_str().unwrap()
+            win_path(&base.join("static")),
+            win_path(&base.join("custom"))
         ),
     );
     let config = AppConfig::parse(&raw_cfg).unwrap();
@@ -2809,6 +2815,100 @@ async fn app_static_custom_app_dir() {
         .unwrap();
     let response = app2.oneshot(request).await.expect("oneshot");
     assert_eq!(response.status(), StatusCode::NOT_FOUND, "逃逸应 404");
+}
+
+#[tokio::test]
+async fn assetlinks_release_fingerprint_and_unsigned_404() {
+    let _gate = GATE.lock().await;
+    let api = prepare().await;
+    async fn get(app: &axum::Router) -> (StatusCode, Value, Vec<(String, String)>, Vec<u8>) {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/.well-known/assetlinks.json")
+            .header("user-agent", "phase1-test")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.expect("oneshot");
+        let status = response.status();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    value.to_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, body, headers, bytes.to_vec())
+    }
+    let header = |headers: &[(String, String)], name: &str| {
+        headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    };
+    // 未签名夹具：无 cert_sha256 → 404 JSON（免登录也 404，绝不回退 SPA）。
+    let base = std::env::temp_dir().join("duolinzao-phase1-assetlinks");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("app")).unwrap();
+    std::fs::write(
+        base.join("app/version.json"),
+        r#"{"versionCode":1,"versionName":"0.1.2","url":"/app/duolinzao.apk","sha256":"abc","signing":"unsigned"}"#,
+    )
+    .unwrap();
+    let raw_cfg = example_config().replace(
+        "[server]",
+        &format!("[server]\nstatic_dir = \"{}\"", win_path(&base)),
+    );
+    let mk = |cfg: AppConfig| {
+        router(
+            AppState::new(
+                api.pool.clone(),
+                cfg,
+                Arc::new(ManualClock::new(
+                    Utc.with_ymd_and_hms(2026, 10, 10, 2, 0, 0).single().unwrap(),
+                )),
+                api.mailer.clone(),
+                Arc::new(api.scripts.clone()),
+            )
+            .unwrap(),
+        )
+    };
+    let app = mk(AppConfig::parse(&raw_cfg).unwrap());
+    let (status, body, headers, bytes) = get(&app).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "未签名应 404");
+    assert_eq!(body["error"], "not_found", "{body}");
+    assert_eq!(header(&headers, "content-type"), "application/json", "{headers:?}");
+    assert!(!String::from_utf8_lossy(&bytes).contains("<html"), "不能回退 SPA");
+    // 已签名夹具：cert_sha256 → 200 + application/json + 归属声明（免登录可拉）。
+    let fp = "0123456789ABCDEF".repeat(4);
+    assert_eq!(fp.len(), 64);
+    std::fs::write(
+        base.join("app/version.json"),
+        format!(
+            r#"{{"versionCode":7,"versionName":"0.1.6","url":"/app/duolinzao.apk","sha256":"abc","signing":"release","cert_sha256":"{fp}"}}"#
+        ),
+    )
+    .unwrap();
+    let app = mk(AppConfig::parse(&raw_cfg).unwrap());
+    let (status, body, headers, _) = get(&app).await;
+    assert_eq!(status, StatusCode::OK, "已签名应 200，{body}");
+    assert_eq!(header(&headers, "content-type"), "application/json", "{headers:?}");
+    let item = &body[0];
+    assert_eq!(item["target"]["namespace"], "android_app", "{body}");
+    assert_eq!(item["target"]["package_name"], "com.duolinzao.app", "{body}");
+    assert_eq!(item["target"]["sha256_cert_fingerprints"][0], fp.as_str(), "{body}");
+    let relations: Vec<&str> = item["relation"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item.as_str().unwrap())
+        .collect();
+    assert!(relations.contains(&"delegate_permission/common.get_login_creds"), "{body}");
 }
 
 #[tokio::test]
@@ -2982,7 +3082,7 @@ async fn apk_boot_auto_sign_skips_without_keystore() {
     .unwrap();
     let raw_cfg = example_config().replace(
         "[server]",
-        &format!("[server]\nstatic_dir = \"{}\"", base.to_str().unwrap()),
+        &format!("[server]\nstatic_dir = \"{}\"", win_path(&base)),
     );
     let state = AppState::new(
         api.pool.clone(),
@@ -3057,7 +3157,7 @@ async fn app_signing_auto_generate_sign_and_overwrite() {
     std::fs::write(app_dir.join("app/duolinzao.apk"), b"fake-apk-bytes").unwrap();
     let raw_cfg = example_config().replace(
         "[server]",
-        &format!("[server]\nstatic_dir = \"{}\"", app_dir.to_str().unwrap()),
+        &format!("[server]\nstatic_dir = \"{}\"", win_path(&app_dir)),
     );
     let config = AppConfig::parse(&raw_cfg).unwrap();
     let state = AppState::new(
@@ -3122,11 +3222,13 @@ async fn app_signing_auto_generate_sign_and_overwrite() {
     assert_eq!(signed["signing"], "release", "{signed}");
     assert_eq!(signed["versionCode"], 7, "{signed}");
     // version.json 落盘：signing=release，sha256 与 APK 文件对得上。
+    // 测试 shim 的 verify 无 --print-certs 输出：发版继续但不写证书指纹。
     let meta: Value =
         serde_json::from_str(&std::fs::read_to_string(app_dir.join("app/version.json")).unwrap())
             .unwrap();
     assert_eq!(meta["signing"], "release", "{meta}");
     assert_eq!(meta["sha256"], signed["sha256"].as_str().unwrap(), "{meta}");
+    assert!(signed["cert_sha256"].is_null(), "shim 无指纹输出时应为 null，{signed}");
     let apk = std::fs::read(app_dir.join("app/duolinzao.apk")).unwrap();
     assert_eq!(apk, b"fake-apk-bytes", "假 apksigner 应原样拷贝");
     {
