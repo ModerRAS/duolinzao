@@ -1,10 +1,16 @@
 package com.duolinzao.app.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -14,14 +20,35 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 
 private val Green = Color(0xFF2D8A45)
+
+/** 品牌行：绿底圆角「灶」字标 + 名称/副标题（与 Web 登录页、食堂竖屏壳顶栏同观感）。 */
+@Composable
+fun DlBrand(name: String, subtitle: String, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Box(
+            Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(Green),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("灶", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+        }
+        Column {
+            Text(name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
 
 @Composable
 fun DlTheme(content: @Composable () -> Unit) {

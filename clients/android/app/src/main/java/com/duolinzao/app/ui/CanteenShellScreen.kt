@@ -1,20 +1,27 @@
 package com.duolinzao.app.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -30,6 +37,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
@@ -62,6 +70,13 @@ private fun toneColor(tone: String): Color = when (tone) {
     else -> Color(0xFFD1D5DB)
 }
 
+/** 人数大卡数字色：早绿 / 中橙 / 晚紫（与 Web 就餐人数总览同色系）。 */
+private val SLOT_ACCENT = mapOf(
+    "breakfast" to Color(0xFF2D8A45),
+    "lunch" to Color(0xFFE6A23C),
+    "dinner" to Color(0xFF8B5CF6),
+)
+
 /**
  * 食堂竖屏壳：底栏四 Tab（人数 | 选菜 | 菜谱 | 更多）。
  * 顶栏食堂范围为壳级状态（S1），人数/选菜/菜谱共用同一 canteenId，切换后重拉。
@@ -92,18 +107,25 @@ fun CanteenShellScreen(onLogout: () -> Unit, onSwitchEmployee: () -> Unit) {
         }
     }
     var menuDeepLink by remember { mutableStateOf<String?>(null) }
+    // 顶栏标题随 Tab 走（与 Web 食堂竖屏壳同文案）。
+    val (topTitle, topSubtitle) = when (tab) {
+        1 -> "本周选菜" to "勾选立即保存"
+        2 -> "菜谱" to "点行编辑 · 右上新建"
+        3 -> "更多" to "按权限显隐"
+        else -> "多邻灶" to "食堂工作台"
+    }
     Scaffold(
         bottomBar = {
             NavigationBar {
-                NavigationBarItem(selected = tab == 0, onClick = { tab = 0 }, icon = {}, label = { Text("人数") }, modifier = Modifier.testTag("tab_headcount"))
-                NavigationBarItem(selected = tab == 1, onClick = { tab = 1 }, icon = {}, label = { Text("选菜") }, modifier = Modifier.testTag("tab_optimize"))
-                NavigationBarItem(selected = tab == 2, onClick = { tab = 2 }, icon = {}, label = { Text("菜谱") }, modifier = Modifier.testTag("tab_menu"))
-                NavigationBarItem(selected = tab == 3, onClick = { tab = 3 }, icon = {}, label = { Text("更多") }, modifier = Modifier.testTag("tab_more"))
+                CanteenNavItem(selected = tab == 0, glyph = "\uD83D\uDC65", label = "人数", tag = "tab_headcount") { tab = 0 }
+                CanteenNavItem(selected = tab == 1, glyph = "\uD83D\uDCC5", label = "选菜", tag = "tab_optimize") { tab = 1 }
+                CanteenNavItem(selected = tab == 2, glyph = "\uD83D\uDCCB", label = "菜谱", tag = "tab_menu") { tab = 2 }
+                CanteenNavItem(selected = tab == 3, glyph = "⋯", label = "更多", tag = "tab_more") { tab = 3 }
             }
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
-            CanteenTopBar(canteens = canteens, picked = picked, loaded = scopeLoaded, onPick = { picked = it })
+            CanteenTopBar(canteens = canteens, picked = picked, loaded = scopeLoaded, onPick = { picked = it }, title = topTitle, subtitle = topSubtitle)
             val empty = scopeLoaded && (picked.isEmpty() || canteens.isEmpty())
             when (tab) {
                 0 -> HeadcountTab(canteenId = picked, empty = empty)
@@ -115,14 +137,40 @@ fun CanteenShellScreen(onLogout: () -> Unit, onSwitchEmployee: () -> Unit) {
     }
 }
 
-/** 顶栏：管理范围内食堂选择器；仅 1 个时只读展示；空范围时空态提示。 */
+/** 底栏项：emoji 字形 + 选中绿字，选中图标自带浅绿圆角底（与 Web 底栏同观感）；指示条透明。 */
 @Composable
-private fun CanteenTopBar(canteens: List<Canteen>, picked: String, loaded: Boolean, onPick: (String) -> Unit) {
+private fun RowScope.CanteenNavItem(selected: Boolean, glyph: String, label: String, tag: String, onClick: () -> Unit) {
+    NavigationBarItem(
+        selected = selected,
+        onClick = onClick,
+        icon = {
+            Box(
+                Modifier.clip(RoundedCornerShape(8.dp))
+                    .background(if (selected) Color(0xFFE8F5EC) else Color.Transparent)
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                contentAlignment = Alignment.Center,
+            ) { Text(glyph, fontSize = 14.sp) }
+        },
+        label = { Text(label) },
+        colors = NavigationBarItemDefaults.colors(
+            selectedIconColor = Color(0xFF2D8A45),
+            selectedTextColor = Color(0xFF2D8A45),
+            unselectedIconColor = Color(0xFF6B7280),
+            unselectedTextColor = Color(0xFF6B7280),
+            indicatorColor = Color.Transparent,
+        ),
+        modifier = Modifier.testTag(tag),
+    )
+}
+
+/** 顶栏：品牌（灶字标 + 标题/副标题，随 Tab 走）+ 食堂范围选择；仅 1 个时只读展示；空范围时空态提示。 */
+@Composable
+private fun CanteenTopBar(canteens: List<Canteen>, picked: String, loaded: Boolean, onPick: (String) -> Unit, title: String, subtitle: String) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("多邻灶 · 食堂工作台", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        DlBrand(name = title, subtitle = subtitle, modifier = Modifier.weight(1f))
         if (!loaded) {
             Text("…", color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else if (canteens.isEmpty()) {
@@ -198,13 +246,22 @@ private fun HeadcountTab(canteenId: String, empty: Boolean) {
                         Text("有效报餐", style = MaterialTheme.typography.titleMedium)
                     }
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("${counts[slot] ?: 0}", fontSize = 40.sp, color = MaterialTheme.colorScheme.primary)
+                    Text("${counts[slot] ?: 0}", fontSize = 40.sp, color = SLOT_ACCENT[slot] ?: MaterialTheme.colorScheme.primary)
                         Text("人", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
         }
-        Text(if (locked) "该日三餐已锁定（一次锁定）" else "该日三餐尚未锁定", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            Text(
+                if (locked) "该日三餐已锁定（一次锁定）" else "该日三餐尚未锁定",
+                color = if (locked) Color(0xFF246E37) else MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.clip(RoundedCornerShape(999.dp))
+                    .background(if (locked) Color(0xFFE8F5EC) else Color(0xFFF3F4F6))
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+            )
+        }
     }
 }
 
@@ -626,6 +683,7 @@ private fun MoreTab(canteenId: String, empty: Boolean, onLogout: () -> Unit, onS
     }
 }
 
+/** 更多根：分组设置行（反馈 / 管理 / 账户），与 Web 食堂竖屏壳同分组；各组按权限码显隐，空组不出现。 */
 @Composable
 private fun MoreRoot(canteenId: String, onOpen: (String) -> Unit, onLogout: () -> Unit, onSwitchEmployee: () -> Unit) {
     val me = Session.me.collectAsState().value
@@ -635,28 +693,64 @@ private fun MoreRoot(canteenId: String, onOpen: (String) -> Unit, onLogout: () -
     val isSuper = roles.any { it.role == "super_admin" }
     val canAlert = isSuper || roles.any { it.role == "canteen" && it.canteen_ids.contains(canteenId) }
     val canEmployee = perms.any { it == "meal.self_read" || it == "shift.self_write" }
-    val entries = buildList {
-        if (canAlert) add(Triple("alert", "强提醒", "more_entry_alert"))
-        if (perms.contains("rating.admin_read")) add(Triple("rating", "评分汇总", "more_entry_rating"))
-        if (perms.contains("comment.admin_read")) add(Triple("comment", "评语", "more_entry_comment"))
-        if (perms.contains("meal.admin_override")) add(Triple("override", "截止后改单", "more_entry_override"))
-        if (perms.contains("user.invite")) add(Triple("invite", "邀请码", "more_entry_invite"))
+    val feedback = buildList {
+        if (canAlert) add(MoreRow("强提醒", "more_entry_alert") { onOpen("alert") })
+        if (perms.contains("rating.admin_read")) add(MoreRow("评分汇总", "more_entry_rating") { onOpen("rating") })
+        if (perms.contains("comment.admin_read")) add(MoreRow("评语", "more_entry_comment") { onOpen("comment") })
     }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("账户：${me?.personName().orEmpty()}", style = MaterialTheme.typography.titleMedium)
-        entries.forEach { (route, label, tag) ->
-            TextButton(onClick = { onOpen(route) }, modifier = Modifier.testTag(tag)) { Text(label) }
-        }
-        if (canEmployee) {
-            TextButton(onClick = onSwitchEmployee, modifier = Modifier.testTag("canteen_to_employee")) { Text("切换到员工端") }
-        }
-        TextButton(onClick = {
+    val manage = buildList {
+        if (perms.contains("meal.admin_override")) add(MoreRow("截止后改单", "more_entry_override") { onOpen("override") })
+        if (perms.contains("user.invite")) add(MoreRow("邀请码", "more_entry_invite") { onOpen("invite") })
+    }
+    val account = buildList {
+        if (canEmployee) add(MoreRow("切换到员工端", "canteen_to_employee") { onSwitchEmployee() })
+        add(MoreRow("退出登录", "canteen_logout", danger = true) {
             scope.launch {
                 try { Session.repo.logout() } catch (_: Exception) { }
                 Session.logoutLocal()
                 onLogout()
             }
-        }, modifier = Modifier.testTag("canteen_logout")) { Text("退出登录") }
+        })
+    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("账户：${me?.personName().orEmpty()}", style = MaterialTheme.typography.titleMedium)
+        MoreGroup("反馈", feedback)
+        MoreGroup("管理", manage)
+        MoreGroup("账户", account)
+    }
+}
+
+private class MoreRow(val label: String, val tag: String, val danger: Boolean = false, val onClick: () -> Unit)
+
+/** 分组卡：白底 18dp 圆角，行内左文右 ›，退出登录红色。 */
+@Composable
+private fun MoreGroup(title: String, rows: List<MoreRow>) {
+    if (rows.isEmpty()) return
+    Text(
+        title,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 6.dp),
+    )
+    Card(shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth()) {
+        Column {
+            rows.forEachIndexed { index, row ->
+                if (index > 0) HorizontalDivider(color = Color(0xFFEEF0F3))
+                Row(
+                    Modifier.fillMaxWidth().clickable(onClick = row.onClick)
+                        .padding(horizontal = 16.dp, vertical = 13.dp).testTag(row.tag),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        row.label,
+                        fontSize = 15.sp,
+                        color = if (row.danger) Color(0xFFC0392B) else Color.Unspecified,
+                    )
+                    Text("›", color = Color(0xFF9AA3AD))
+                }
+            }
+        }
     }
 }
 

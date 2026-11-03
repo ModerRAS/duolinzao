@@ -75,8 +75,10 @@ fun LoginScreen(onDone: () -> Unit, onRegister: () -> Unit) {
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("多邻灶", style = MaterialTheme.typography.headlineMedium)
-        Text("员工登录", style = MaterialTheme.typography.titleMedium)
+        DlBrand(name = "多邻灶", subtitle = "员工登录")
+        Spacer(Modifier.height(8.dp))
+        Text("登录", style = MaterialTheme.typography.headlineSmall)
+        Text("使用通行密钥，或输入账号继续", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(8.dp))
         DlTextField(username, { username = it }, "账号", testTag = "login_username")
 
@@ -207,6 +209,12 @@ fun LoginScreen(onDone: () -> Unit, onRegister: () -> Unit) {
         }
 
         ErrorLine(error)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "新设备将等待已登录设备页内确认 · 不扫码",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         TextButton(onClick = onRegister) { Text("有邀请码，去注册") }
         if (busy) Text("处理中…")
     }
