@@ -9,8 +9,8 @@ use webauthn_rs::prelude::{
 
 use super::{
     audit, audit_user, check_login_rate, email_enabled, ensure_password, ensure_username,
-    issue_session, login_body, normalize_display_name, record_attempt, record_login,
-    too_many_failures,
+    issue_session, login_body, normalize_display_name, optional_password, record_attempt,
+    record_login, too_many_failures,
     IssuedSession, EMAIL_OTP_LOCK_MINUTES, EMAIL_OTP_MAX_FAILURES, EMAIL_OTP_MINUTES,
     EMAIL_OTP_RESEND_SECONDS, EMAIL_OTP_STEP_SECONDS, PASSKEY_CHALLENGE_MINUTES,
 };
@@ -123,20 +123,26 @@ pub async fn methods(state: &AppState) -> Result<Value, AppError> {
 }
 
 /// 注册成功即登录：事务提交后签发与密码登录相同的会话（不走 `login_approval` 新设备确认）。
+/// 密码可省略：空白或未传则 `password_hash` 为 NULL；非空仍至少 8 个字符并哈希。
 /// 审计保留 register 一条并在 summary 标明已发会话，另记 method=`register` 的登录审计。
 pub async fn register(
     state: &AppState,
     username: &str,
     invite_code: &str,
-    password: &str,
+    password: Option<&str>,
     user_agent: &str,
     ip: &str,
 ) -> Result<(Value, IssuedSession), AppError> {
     let username = ensure_username(username)?;
-    ensure_password(password)?;
+    let password = optional_password(password)?;
     if invite_code.trim().is_empty() {
         return Err(AppError::bad("invite_invalid", "邀请码无效"));
     }
+    // 哈希放在事务外，避免 Argon2 占着邀请码行锁。
+    let password_hash = match password {
+        Some(value) => Some(hash_password(value).await?),
+        None => None,
+    };
     let now = state.clock.now();
     let mut tx = state.pool.begin().await?;
     let invite = sqlx::query(
@@ -167,7 +173,6 @@ pub async fn register(
     if taken {
         return Err(AppError::conflict("username_taken", "账号已被占用"));
     }
-    let password_hash = hash_password(password).await?;
     let account_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO account (username, password_hash, created_at)
@@ -313,6 +318,11 @@ pub async fn me(state: &AppState, user: &CurrentUser) -> Result<Value, AppError>
     let row = sqlx::query(
         r#"
         SELECT a.email, a.email_verified, a.display_name,
+               a.password_hash IS NOT NULL AS has_password,
+               EXISTS(
+                   SELECT 1 FROM passkey p
+                   WHERE p.account_id = a.id AND p.revoked_at IS NULL
+               ) AS has_passkey,
                EXISTS(
                    SELECT 1 FROM totp_credential t
                    WHERE t.account_id = a.id AND t.confirmed
@@ -341,6 +351,8 @@ pub async fn me(state: &AppState, user: &CurrentUser) -> Result<Value, AppError>
         "display_name": row.get::<Option<String>, _>("display_name"),
         "email": row.get::<Option<String>, _>("email"),
         "email_verified": row.get::<bool, _>("email_verified"),
+        "has_password": row.get::<bool, _>("has_password"),
+        "has_passkey": row.get::<bool, _>("has_passkey"),
         "totp": row.get::<bool, _>("totp"),
         "roles": roles,
         "permissions": crate::rbac::permission_codes(&user.assignments),
@@ -382,7 +394,8 @@ pub async fn update_display_name(
     Ok(json!({"display_name": display_name}))
 }
 
-/// 自助改密：校验当前密码，保留当前会话，吊销该账号其它会话，并作废未消费的邮箱 OTP。
+/// 自助改密或首次设密。已有哈希时校验当前密码；尚无哈希时不要求当前密码。
+/// 成功保留当前会话，吊销该账号其它会话，并作废未消费的邮箱 OTP。
 /// 总管找回仍走 `revoke_all_sessions`，连当前会话一起吊销。
 pub async fn change_password(
     state: &AppState,
@@ -399,19 +412,17 @@ pub async fn change_password(
         .bind(user.account_id)
         .fetch_one(&mut *tx)
         .await?;
-    let Some(hash) = row.get::<Option<String>, _>("password_hash") else {
-        return Err(AppError::bad(
-            "password_missing",
-            "这个账号还没有密码，请联系总管找回",
-        ));
-    };
-    if !verify_password(current_password, &hash).await? {
-        drop(tx);
-        record_login(&state.pool, &user.username, ip, false, now).await?;
-        return Err(AppError::bad("password_incorrect", "当前密码不正确"));
-    }
-    if current_password == new_password {
-        return Err(AppError::bad("password_unchanged", "新密码与当前密码相同"));
+    let existing = row.get::<Option<String>, _>("password_hash");
+    let first_set = existing.is_none();
+    if let Some(hash) = existing.as_deref() {
+        if !verify_password(current_password, hash).await? {
+            drop(tx);
+            record_login(&state.pool, &user.username, ip, false, now).await?;
+            return Err(AppError::bad("password_incorrect", "当前密码不正确"));
+        }
+        if current_password == new_password {
+            return Err(AppError::bad("password_unchanged", "新密码与当前密码相同"));
+        }
     }
     ensure_password(new_password)?;
     let new_hash = hash_password(new_password).await?;
@@ -455,7 +466,7 @@ pub async fn change_password(
             action: "password_change".into(),
             object_type: Some("account".into()),
             object_id: Some(user.account_id.to_string()),
-            summary: json!({"revoked_other_sessions": revoked}),
+            summary: json!({"revoked_other_sessions": revoked, "first_set": first_set}),
             result: "ok".into(),
         },
     )

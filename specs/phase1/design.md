@@ -134,7 +134,7 @@ erDiagram
 
 主要字段：
 
-- `account`：唯一字符串用户名、可选邮箱、可空密码哈希。邮箱只在使用 magic link 前绑定，注册时不强制。
+- `account`：唯一字符串用户名、可选邮箱、可空密码哈希。邮箱只在使用 magic link 前绑定，注册时不强制。注册可以不传密码。设备能创建通行密钥时，客户端必须绑定成功才进入；不能创建、用户取消或创建失败时才写入至少 8 位密码。注册不采集 TOTP。
 - `invite_code`：持有 `user.invite` 的账号发放，一次性。
 - `role_assignment`：`account_id`、`role`、`canteen_ids`（`super_admin` 为空并视为 `*`）、可选的来源标签文本。授权不读取标签文本。
 - `canteen`、`canteen_member`、`canteen_staff`：员工绑定与食堂管理人员分开。`canteen_staff` 与 `canteen` 角色分配指向同一批食堂。
@@ -217,7 +217,7 @@ Magic link 单次有效，15 分钟过期。这个时长是实现参数。待确
 
 | 分组 | 方法与路径 | 说明 |
 |------|------------|------|
-| 注册 | `POST /api/register` | 字符串账号 + 邀请码 |
+| 注册 | `POST /api/register` | 字符串账号 + 邀请码；`password` 可省略，省略则 `password_hash` 为 NULL |
 | 登录 | `POST /api/session/passkey/start`、`finish` | WebAuthn |
 | 登录 | `POST /api/session/totp` | TOTP |
 | 登录 | `POST /api/session/magic-link/request`、`consume` | 邮箱链接 |

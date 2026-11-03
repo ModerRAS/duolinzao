@@ -71,6 +71,8 @@ export interface Me {
   display_name: string | null;
   email: string | null;
   email_verified: boolean;
+  has_password: boolean;
+  has_passkey: boolean;
   totp: boolean;
   roles: { role: string; canteen_ids: string[]; source_label: string | null }[];
   permissions: string[];

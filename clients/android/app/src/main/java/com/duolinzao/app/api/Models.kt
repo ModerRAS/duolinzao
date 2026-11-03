@@ -27,6 +27,8 @@ data class Me(
     val roles: List<RoleAssign> = emptyList(),
     val permissions: List<String> = emptyList(),
     val email_enabled: Boolean = false,
+    val has_password: Boolean = true,
+    val has_passkey: Boolean = false,
 ) {
     fun personName(): String {
         val custom = display_name?.trim().orEmpty()

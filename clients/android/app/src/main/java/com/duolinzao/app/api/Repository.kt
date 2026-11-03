@@ -34,8 +34,8 @@ interface DlRepository {
     suspend fun verifyEmailOtp(username: String, code: String)
     suspend fun passkeyStart(username: String? = null): PasskeyStartResp
     suspend fun passkeyFinish(username: String? = null, challengeId: String, credentialJson: String)
-    /** 注册成功即登录（服务端 Set-Cookie；旧服务端无 Cookie 时调用方回退密码登录）。 */
-    suspend fun register(username: String, inviteCode: String, password: String)
+    /** 注册成功即下发会话。password 省略或空白则不设密码。 */
+    suspend fun register(username: String, inviteCode: String, password: String? = null)
     suspend fun me(): Me
     suspend fun logout()
     suspend fun updateDisplayName(name: String): String?
@@ -150,9 +150,11 @@ class NetworkRepository(private val api: ApiClient) : DlRepository {
             put("challenge_id", challengeId); put("credential", credential)
         }.toString())
     }
-    override suspend fun register(username: String, inviteCode: String, password: String) {
+    override suspend fun register(username: String, inviteCode: String, password: String?) {
         api.post("/api/register", buildJsonObject {
-            put("username", username); put("invite_code", inviteCode); put("password", password)
+            put("username", username)
+            put("invite_code", inviteCode)
+            if (!password.isNullOrBlank()) put("password", password)
         }.toString())
     }
     override suspend fun me(): Me = parse(api.get("/api/me"))

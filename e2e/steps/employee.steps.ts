@@ -6,9 +6,14 @@ import {
   ensureBound,
   ensureLoggedIn,
   inviteCode,
+  keepSharedPasswordUser,
   openTab,
-  registerNewUser,
+  finishRegisterWithPassword,
+  openInviteRegister,
+  password,
+  rememberRegisteredUser,
   rootSession,
+  submitInviteRegister,
 } from "./helpers";
 
 const { Given, When, Then } = createBdd(test);
@@ -87,12 +92,53 @@ When("未登录用户打开邀请码注册页", async ({ page }) => {
 });
 
 When("填写字符串账号与邀请码并提交", async ({ page }) => {
-  // registerNewUser 会清 cookie、现开邀请码并完成注册（可能再导航一次，幂等）。
-  await registerNewUser(page);
+  await openInviteRegister(page);
+  await submitInviteRegister(page);
+});
+
+Then("注册后必须绑定通行密钥，不能跳过", async ({ page }) => {
+  await expect(page.getByRole("heading", { name: "绑定通行密钥" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "绑定通行密钥" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "暂时跳过" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "设置密码并进入" })).toHaveCount(0);
+  await expect(page.getByText("不能改用密码跳过")).toBeVisible();
+});
+
+When("通行密钥无法完成时设置密码", async ({ page }) => {
+  await finishRegisterWithPassword(page, password);
+  await expect(page.locator(".emp")).toBeVisible();
 });
 
 Then("账号创建成功并可进入登录", async ({ page }) => {
   await expect(page.locator(".emp")).toBeVisible();
+  const me = await page.request.get("/api/me").then((r) => r.json());
+  expect(me.has_password).toBe(true);
+  rememberRegisteredUser();
+});
+
+When("在支持通行密钥时完成绑定", async ({ page }) => {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "usb",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+    },
+  });
+  await page.getByRole("button", { name: "绑定通行密钥" }).click();
+  await expect(page.locator(".emp")).toBeVisible({ timeout: 20000 });
+});
+
+Then("直接进入且账号没有密码", async ({ page }) => {
+  await expect(page.locator(".emp")).toBeVisible();
+  const me = await page.request.get("/api/me").then((r) => r.json());
+  expect(me.has_passkey).toBe(true);
+  expect(me.has_password).toBe(false);
+  await expect(page.getByRole("heading", { name: "设置密码" })).toHaveCount(0);
+  keepSharedPasswordUser();
 });
 
 Then("新账号默认持有员工角色", async ({ page }) => {

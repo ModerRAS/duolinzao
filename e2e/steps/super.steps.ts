@@ -345,6 +345,7 @@ Then("不强制验证邮箱", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "注册" })).toBeVisible();
   await expect(page.getByPlaceholder("账号")).toBeVisible();
   await expect(page.getByPlaceholder(/邮箱/)).toHaveCount(0);
+  await expect(page.getByPlaceholder(/密码/)).toHaveCount(0);
 });
 
 Then("可不配置 SMTP 仍可运行", async ({ page }) => {

@@ -20,6 +20,7 @@ class MockRepository : DlRepository {
     private var displayName: String? = "演示用户"
     private var email: String? = null
     private var totpOn = false
+    private var hasPassword = true
     private val notices = mutableListOf(
         Notice("n1", "shift", "欢迎来到多邻灶", "这是离线演示数据：选班制后即可看到报餐。", null, "2026-10-20T00:00:00Z"),
     )
@@ -34,6 +35,7 @@ class MockRepository : DlRepository {
         if (username.isBlank() || password.isBlank()) throw ApiException(400, "login_failed", "账号或密码不正确")
         authed = true
         lastUsername = username.trim()
+        hasPassword = true
     }
     override suspend fun loginTotp(username: String, code: String) {
         if (code.trim().length != 6) throw ApiException(400, "totp_invalid", "验证码不正确")
@@ -49,11 +51,17 @@ class MockRepository : DlRepository {
     override suspend fun passkeyFinish(username: String?, challengeId: String, credentialJson: String) {
         authed = true
     }
-    override suspend fun register(username: String, inviteCode: String, password: String) {
-        if (username.isBlank() || inviteCode.isBlank() || password.length < 8) {
-            throw ApiException(400, "register_invalid", "账号、邀请码或密码不符合要求")
+    override suspend fun register(username: String, inviteCode: String, password: String?) {
+        if (username.isBlank() || inviteCode.isBlank()) {
+            throw ApiException(400, "register_invalid", "账号或邀请码不符合要求")
+        }
+        if (!password.isNullOrBlank() && password.length < 8) {
+            throw ApiException(400, "password_weak", "密码至少 8 个字符")
         }
         authed = true
+        lastUsername = username.trim()
+        hasPassword = !password.isNullOrBlank()
+        passkeys.clear()
     }
     override suspend fun me(): Me {
         needAuth()
@@ -62,10 +70,12 @@ class MockRepository : DlRepository {
             return Me("mock-canteen", "canteen", "食堂演示", null, false, false,
                 listOf(RoleAssign("canteen", listOf("c1"))),
                 listOf("menu.read", "menu.write", "optimizer.read", "meal.admin_override",
-                    "rating.admin_read", "comment.admin_read", "user.invite", "meal.self_read"), true)
+                    "rating.admin_read", "comment.admin_read", "user.invite", "meal.self_read"), true,
+                true, passkeys.isNotEmpty())
         }
         return Me("mock-id", "demo", displayName, email, email != null, totpOn,
-            listOf(RoleAssign("employee")), listOf("meal.self_read", "meal.self_write"), true)
+            listOf(RoleAssign("employee")), listOf("meal.self_read", "meal.self_write"), true,
+            hasPassword, passkeys.isNotEmpty())
     }
     override suspend fun logout() { authed = false }
     override suspend fun updateDisplayName(name: String): String? {
@@ -76,6 +86,10 @@ class MockRepository : DlRepository {
     override suspend fun changePassword(current: String, next: String) {
         needAuth()
         if (next.length < 8) throw ApiException(400, "password_weak", "密码至少 8 个字符")
+        if (hasPassword && current.isBlank()) {
+            throw ApiException(400, "password_incorrect", "当前密码不正确")
+        }
+        hasPassword = true
     }
     override suspend fun bindEmail(email: String) {
         needAuth()

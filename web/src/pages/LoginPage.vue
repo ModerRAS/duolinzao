@@ -4,11 +4,12 @@ import { ElMessage } from "element-plus";
 import { ApiError, api, type Me } from "../api";
 import { refreshSession } from "../session";
 import { appVersion, loadVersion } from "../version";
-import { unwrapPublicKey } from "../webauthn";
+import { prepareCreation, registrationToJson, unwrapPublicKey } from "../webauthn";
 
+const props = defineProps<{ enrolling?: boolean }>();
 const emit = defineEmits<{ enter: [] }>();
 
-type Screen = "home" | "methods" | "password" | "code" | "email" | "wait" | "register";
+type Screen = "home" | "methods" | "password" | "code" | "email" | "wait" | "register" | "passkey" | "fallback";
 
 const screen = ref<Screen>("home");
 const methods = ref<string[]>(["passkey", "totp", "password"]);
@@ -19,7 +20,10 @@ const code = ref("");
 const otpCode = ref("");
 const regUser = ref("");
 const regCode = ref("");
-const regPassword = ref("");
+const binding = ref(false);
+const fallbackPassword = ref("");
+const fallbackConfirm = ref("");
+const canTryPasskey = ref(typeof window !== "undefined" && !!window.PublicKeyCredential);
 const wait = ref<{ id: string; poll: string; ip: string; ua: string; name: string; status: string } | null>(null);
 
 const account = computed(() => username.value.trim() || "账号");
@@ -28,6 +32,8 @@ const showEmail = computed(() => emailEnabled.value && methods.value.includes("e
 
 onMounted(async () => {
   loadVersion();
+  canTryPasskey.value = !!window.PublicKeyCredential;
+  if (props.enrolling) screen.value = canTryPasskey.value ? "passkey" : "fallback";
   try {
     const body = await api<{ methods: string[]; email_enabled: boolean }>("/api/session/methods");
     methods.value = body.methods;
@@ -184,6 +190,10 @@ function bufferToBase64url(buffer: ArrayBuffer): string {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+function passkeyUnavailable() {
+  screen.value = "fallback";
+}
+
 async function register() {
   try {
     await api("/api/register", {
@@ -191,12 +201,80 @@ async function register() {
       body: JSON.stringify({
         username: regUser.value,
         invite_code: regCode.value,
-        password: regPassword.value,
       }),
     });
-    await enter();
+    if (!window.PublicKeyCredential) {
+      passkeyUnavailable();
+      return;
+    }
+    screen.value = "passkey";
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "注册失败");
+  }
+}
+
+async function bindRegisteredPasskey() {
+  if (!window.PublicKeyCredential) {
+    passkeyUnavailable();
+    return;
+  }
+  binding.value = true;
+  try {
+    const started = await api<{ challenge_id: string; publicKey: Record<string, unknown> }>(
+      "/api/passkeys/register/start",
+      { method: "POST" },
+    );
+    const publicKey = prepareCreation(unwrapPublicKey(started));
+    let credential: PublicKeyCredential | null;
+    try {
+      credential = (await navigator.credentials.create({ publicKey })) as PublicKeyCredential | null;
+    } catch {
+      passkeyUnavailable();
+      return;
+    }
+    if (!credential) {
+      passkeyUnavailable();
+      return;
+    }
+    await api("/api/passkeys/register/finish", {
+      method: "POST",
+      body: JSON.stringify({
+        challenge_id: started.challenge_id,
+        credential: registrationToJson(credential),
+        friendly_name: "本机",
+      }),
+    });
+    ElMessage.success("通行密钥已绑定");
+    await enter();
+  } catch {
+    passkeyUnavailable();
+  } finally {
+    binding.value = false;
+  }
+}
+
+async function finishWithPassword() {
+  if ([...fallbackPassword.value].length < 8) {
+    ElMessage.error("密码至少 8 个字符");
+    return;
+  }
+  if (fallbackPassword.value !== fallbackConfirm.value) {
+    ElMessage.error("两次输入的密码不一致");
+    return;
+  }
+  binding.value = true;
+  try {
+    await api("/api/me/password", {
+      method: "POST",
+      body: JSON.stringify({ new_password: fallbackPassword.value }),
+    });
+    fallbackPassword.value = "";
+    fallbackConfirm.value = "";
+    await enter();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "密码设置失败");
+  } finally {
+    binding.value = false;
   }
 }
 
@@ -333,11 +411,25 @@ async function poll() {
         <button type="button" class="link muted" @click="screen = 'methods'">换一种方式</button>
       </template>
 
+      <template v-else-if="screen === 'passkey'">
+        <h1>绑定通行密钥</h1>
+        <p class="sub">要先绑定通行密钥才能进入。这台设备可以创建通行密钥时，不能改用密码跳过。</p>
+        <el-button type="primary" class="full" :disabled="binding" @click="bindRegisteredPasskey">绑定通行密钥</el-button>
+      </template>
+
+      <template v-else-if="screen === 'fallback'">
+        <h1>设置密码</h1>
+        <p class="sub">通行密钥现在用不了（设备不支持、已取消或创建失败）。请设置至少 8 位密码后再进入。</p>
+        <el-input v-model="fallbackPassword" type="password" show-password placeholder="密码（至少 8 位）" autocomplete="new-password" class="mb" />
+        <el-input v-model="fallbackConfirm" type="password" show-password placeholder="再输入一次密码" autocomplete="new-password" class="mb" @keyup.enter="finishWithPassword" />
+        <el-button type="primary" class="full" :disabled="binding" @click="finishWithPassword">设置密码并进入</el-button>
+        <button v-if="canTryPasskey" type="button" class="link" :disabled="binding" @click="screen = 'passkey'">重试通行密钥</button>
+      </template>
+
       <template v-else>
         <h1>注册</h1>
-        <el-input v-model="regUser" placeholder="账号" class="mb" />
+        <el-input v-model="regUser" placeholder="账号" autocomplete="username" class="mb" />
         <el-input v-model="regCode" placeholder="邀请码" class="mb" />
-        <el-input v-model="regPassword" type="password" show-password placeholder="密码（至少 8 位）" class="mb" />
         <el-button type="primary" class="full" @click="register">注册并登录</el-button>
         <button type="button" class="link" @click="screen = 'home'">返回登录</button>
       </template>
@@ -389,6 +481,7 @@ h1 { margin: 0 0 8px; font-size: 22px; text-align: center; font-weight: 700; }
 .foot { margin-top: 14px; font-size: 12px; color: #9ca3af; }
 .ver { margin-top: 6px; font-size: 11px; color: #b6bcc6; }
 .link { display: block; width: 100%; margin-top: 12px; border: none; background: transparent; color: #2d8a45; cursor: pointer; font-size: 14px; }
+.link:disabled { opacity: 0.5; cursor: default; }
 .link.muted { color: #6b7280; }
 .link.left { width: auto; margin-top: 0; text-align: left; }
 .mb { margin-bottom: 10px; }

@@ -50,21 +50,78 @@ export async function mintInviteCode(): Promise<string> {
   return inviteCode;
 }
 
-// 注册一个全新账号并登录（用户名保证唯一，套件可重复跑）。
-export async function registerNewUser(page: Page) {
+export function rememberRegisteredUser() {
+  mkdirSync(".tmp", { recursive: true });
+  writeFileSync(userFile, currentUser);
+}
+
+// 通行密钥成功的账号没有密码，不能覆盖后续用密码登录的共享账号。
+export function keepSharedPasswordUser() {
+  currentUser = readSharedUser();
+}
+
+// 打开邀请注册并填好账号、邀请码。注册页没有密码框。
+export async function openInviteRegister(page: Page) {
   currentUser = `e2e_${Date.now()}_${seq++}`;
-  // 先清会话：同 page 可能还登着 canteen/admin，不清会进不了注册页或注册被会话挡住。
   await page.context().clearCookies();
   const code = await mintInviteCode();
   await page.goto("/");
   await page.getByRole("button", { name: "有邀请码，去注册" }).click();
+  await expect(page.getByRole("heading", { name: "注册" })).toBeVisible();
+  await expect(page.getByPlaceholder(/密码/)).toHaveCount(0);
   await page.getByPlaceholder("账号").fill(currentUser);
   await page.getByPlaceholder("邀请码").fill(code);
-  await page.getByPlaceholder("密码（至少 8 位）").fill(password);
+}
+
+// 提交后停在「必须绑定通行密钥」，不能跳过，也不出现密码。
+export async function submitInviteRegister(page: Page) {
   await page.getByRole("button", { name: "注册并登录" }).click();
+  await expect(page.getByRole("heading", { name: "绑定通行密钥" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "绑定通行密钥" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "暂时跳过" })).toHaveCount(0);
+  await expect(page.getByPlaceholder(/密码/)).toHaveCount(0);
+}
+
+// 让下一次通行密钥创建立刻按用户取消失败，从而走到必填密码。
+export async function rejectNextPasskeyCreate(page: Page) {
+  await page.evaluate(() => {
+    const creds = navigator.credentials as CredentialsContainer & { __dlzCreate?: CredentialsContainer["create"] };
+    if (!creds || creds.__dlzCreate) return;
+    creds.__dlzCreate = creds.create.bind(creds);
+    creds.create = () =>
+      Promise.reject(new DOMException("The operation either timed out or was not allowed.", "NotAllowedError"));
+  });
+}
+
+export async function restorePasskeyCreate(page: Page) {
+  await page.evaluate(() => {
+    const creds = navigator.credentials as CredentialsContainer & { __dlzCreate?: CredentialsContainer["create"] };
+    if (creds?.__dlzCreate) {
+      creds.create = creds.__dlzCreate;
+      delete creds.__dlzCreate;
+    }
+  });
+}
+
+// 通行密钥失败后，用必填密码完成注册并进入。
+export async function finishRegisterWithPassword(page: Page, next = password) {
+  await rejectNextPasskeyCreate(page);
+  await page.getByRole("button", { name: "绑定通行密钥" }).click();
+  await expect(page.getByRole("heading", { name: "设置密码" })).toBeVisible({ timeout: 15000 });
+  await restorePasskeyCreate(page);
+  await page.getByPlaceholder("密码（至少 8 位）").fill(next);
+  await page.getByPlaceholder("再输入一次密码").fill(next);
+  await page.getByRole("button", { name: "设置密码并进入" }).click();
+}
+
+// 注册一个全新账号并登录（用户名保证唯一，套件可重复跑）。
+// 通行密钥在自动化里按取消失败，因此走必填密码，后续场景仍能用密码登录。
+export async function registerNewUser(page: Page) {
+  await openInviteRegister(page);
+  await submitInviteRegister(page);
+  await finishRegisterWithPassword(page, password);
   await expect(page.locator(".emp")).toBeVisible();
-  mkdirSync(".tmp", { recursive: true });
-  writeFileSync(userFile, currentUser);
+  rememberRegisteredUser();
 }
 
 // 保证已登录：优先用本轮已注册账号（文件共享，跨进程），

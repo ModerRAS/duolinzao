@@ -11,6 +11,7 @@ import {
   addDaysStr,
   baseURL,
   ensureSuper,
+  finishRegisterWithPassword,
   flipOverrideRow,
   lastDenial,
   loginAs,
@@ -348,8 +349,10 @@ When("花名册中每位员工完成邀请码注册", async ({ page }) => {
     await page.getByRole("button", { name: "有邀请码，去注册" }).click();
     await page.getByPlaceholder("账号").fill(e.user);
     await page.getByPlaceholder("邀请码").fill(inviteCodes[i]);
-    await page.getByPlaceholder("密码（至少 8 位）").fill(e.pass);
+    await expect(page.getByPlaceholder(/密码/)).toHaveCount(0);
     await page.getByRole("button", { name: "注册并登录" }).click();
+    await expect(page.getByRole("heading", { name: "绑定通行密钥" })).toBeVisible({ timeout: 15000 });
+    await finishRegisterWithPassword(page, e.pass);
     await expect(page.locator(".emp")).toBeVisible({ timeout: 15000 });
   }
 });

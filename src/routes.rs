@@ -272,7 +272,9 @@ async fn methods(State(state): State<AppState>) -> Result<Json<Value>, AppError>
 struct RegisterBody {
     username: String,
     invite_code: String,
-    password: String,
+    /// 省略、null 或空白表示不设密码。
+    #[serde(default)]
+    password: Option<String>,
 }
 
 async fn register(
@@ -282,9 +284,15 @@ async fn register(
     Json(body): Json<RegisterBody>,
 ) -> Result<impl IntoResponse, AppError> {
     // 注册成功即登录：直接带上会话 cookie，不用再登一次。
-    let (created, issued) =
-        session::register(&state, &body.username, &body.invite_code, &body.password, &ua.0, &ip.0)
-            .await?;
+    let (created, issued) = session::register(
+        &state,
+        &body.username,
+        &body.invite_code,
+        body.password.as_deref(),
+        &ua.0,
+        &ip.0,
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         with_token(&issued.raw_token, state.config.cookie_secure, created),
@@ -552,6 +560,8 @@ async fn put_display_name(
 
 #[derive(Deserialize)]
 struct PasswordChangeBody {
+    /// 尚无密码时可以省略。已有密码时必须是当前密码。
+    #[serde(default)]
     current_password: String,
     new_password: String,
 }

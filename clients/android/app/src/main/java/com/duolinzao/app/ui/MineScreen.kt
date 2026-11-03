@@ -111,10 +111,18 @@ fun MineScreen(onLogout: () -> Unit, onOpenShift: () -> Unit, onSwitchWorkbench:
             DlTextField(email, { email = it }, "邮箱")
             DlOutlineButton("绑定邮箱") { scope.launch { run({ Session.repo.bindEmail(email) }, "已绑定") } }
         }
-        DlTextField(curPwd, { curPwd = it }, "当前密码", password = true)
-        DlTextField(newPwd, { newPwd = it }, "新密码（至少 8 位）", password = true)
-        DlOutlineButton("自助改密（保留本会话，吊销其它会话）") {
-            scope.launch { run({ Session.repo.changePassword(curPwd, newPwd); curPwd = ""; newPwd = "" }, "已改密") }
+        if (me?.has_password != false) {
+            DlTextField(curPwd, { curPwd = it }, "当前密码", password = true)
+        }
+        DlTextField(newPwd, { newPwd = it }, if (me?.has_password == false) "密码（至少 8 位）" else "新密码（至少 8 位）", password = true)
+        DlOutlineButton(if (me?.has_password == false) "设置密码" else "自助改密（保留本会话，吊销其它会话）") {
+            scope.launch {
+                run({
+                    Session.repo.changePassword(if (me?.has_password == false) "" else curPwd, newPwd)
+                    curPwd = ""
+                    newPwd = ""
+                }, if (me?.has_password == false) "密码已设置" else "已改密")
+            }
         }
         if (me?.totp == true) {
             Text("已绑定认证器 TOTP")

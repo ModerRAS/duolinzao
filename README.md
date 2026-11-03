@@ -48,7 +48,7 @@ docker compose up               # Postgres 旁路 + app（静态前端由 app �
 
 真实客户端 IP（Traefik 后面）：`server.trust_proxy` 缺省 `false`，直接取对端地址。生产在 Traefik 后面才配 `true`，此时只解析一层 `X-Forwarded-For` 首段 / `Forwarded` 首个 `for=`，用于登录限流与审计记 IP；开关关闭时绝不读这些头，防客户端伪造。Traefik 侧必须设置 `X-Forwarded-For`（`entryPoints.proxyProtocol` 或 `forwardedHeaders`），否则所有请求都会记成网关 IP，登录限流会误伤。`config.docker.example.toml` 默认 `true`，本地示例默认 `false`。
 
-会话与找回：`POST /api/admin/recovery` 的 `reset_password` 成功后吊销该账号全部会话并作废未消费 magic link（旧 cookie 立刻 401）。自助改密是 `POST /api/me/password`：校验当前密码，保留当前会话，吊销其它会话，并作废未消费 magic link。`username` 只读；`PUT /api/me/display-name` 改显示名，`GET /api/me` 带上 `display_name`。`POST /api/session/logout` 吊销当前会话并清 cookie。TOTP 与 Passkey 登录和密码共用同一失败计数窗（用户键 + IP 键，15 分钟 20 次），自助改密的当前密码错误也计入该窗，失败也落库，超限同返 429 `login_rate_limited`。
+会话与找回：`POST /api/admin/recovery` 的 `reset_password` 成功后吊销该账号全部会话并作废未消费 magic link（旧 cookie 立刻 401）。`POST /api/register` 的 `password` 可省略，省略则 `password_hash` 为 NULL；设备能创建通行密钥时，注册后必须绑定成功才进入，不能跳过。通行密钥不可用、用户取消或创建失败时，才用 `POST /api/me/password` 设置至少 8 位密码。已有密码时该接口校验当前密码；尚无密码时首次设置不要求当前密码。两种成功都保留当前会话，吊销其它会话，并作废未消费 magic link。注册不采集 TOTP。`username` 只读；`PUT /api/me/display-name` 改显示名，`GET /api/me` 带上 `display_name`、`has_password`、`has_passkey`。`POST /api/session/logout` 吊销当前会话并清 cookie。TOTP 与通行密钥登录和密码共用同一失败计数窗（用户键 + IP 键，15 分钟 20 次），已有密码时当前密码错误也计入该窗，失败也落库，超限同返 429 `login_rate_limited`。
 
 LLM 出站收紧：`base_url` 只允许 `https`（`http` 仅放行回环 `localhost`/`127/8`/`::1` 测试例外），字面私网/链路本地/组播/文档地址一律拒绝，含凭据的 URL 拒绝；出站客户端最多跟 2 跳重定向。`PUT /api/admin/llm-channels` 的每次变更都写审计（记 kind + base_url + model，不记 key 明文）。
 

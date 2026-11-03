@@ -95,7 +95,16 @@ private fun Root(onLogout: () -> Unit) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(bootError!!) }
         return
     }
-    NavHost(nav, startDestination = if (me != null) "shell" else "login") {
+    val current = me
+    val needsFactor = current != null && !current.has_password && !current.has_passkey
+    NavHost(
+        nav,
+        startDestination = when {
+            needsFactor -> "register"
+            current != null -> "shell"
+            else -> "login"
+        },
+    ) {
         composable("login") {
             LoginScreen(
                 onDone = { nav.navigate("shell") { popUpTo("login") { inclusive = true } } },
@@ -104,7 +113,8 @@ private fun Root(onLogout: () -> Unit) {
         }
         composable("register") {
             RegisterScreen(
-                onDone = { nav.navigate("shell") { popUpTo("login") { inclusive = true } } },
+                // 从登录页推进来，或冷启动停在注册页，进入后都清掉后面的返回栈。
+                onDone = { nav.navigate("shell") { popUpTo(nav.graph.id) { inclusive = true } } },
                 onBack = { nav.popBackStack() },
             )
         }

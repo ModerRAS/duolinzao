@@ -263,6 +263,18 @@ pub fn ensure_password(password: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 注册密码：缺省或空白表示不设密码；非空仍至少 8 个字符。
+pub fn optional_password(password: Option<&str>) -> Result<Option<&str>, AppError> {
+    match password {
+        None => Ok(None),
+        Some(value) if value.trim().is_empty() => Ok(None),
+        Some(value) => {
+            ensure_password(value)?;
+            Ok(Some(value))
+        }
+    }
+}
+
 pub fn ensure_username(username: &str) -> Result<String, AppError> {
     let username = username.trim().to_string();
     if username.is_empty()
@@ -294,7 +306,7 @@ pub fn normalize_display_name(raw: &str) -> Result<Option<String>, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_display_name;
+    use super::{normalize_display_name, optional_password};
 
     #[test]
     fn display_name_trims_and_rejects_controls() {
@@ -313,5 +325,17 @@ mod tests {
                 .count(),
             64
         );
+    }
+
+    #[test]
+    fn optional_password_omits_blank_and_rejects_short() {
+        assert_eq!(optional_password(None).unwrap(), None);
+        assert_eq!(optional_password(Some("")).unwrap(), None);
+        assert_eq!(optional_password(Some("   ")).unwrap(), None);
+        assert_eq!(
+            optional_password(Some("password-1")).unwrap(),
+            Some("password-1")
+        );
+        assert!(optional_password(Some("short")).is_err());
     }
 }

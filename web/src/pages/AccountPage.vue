@@ -50,6 +50,7 @@ const emailStatus = computed(() => {
   if (!auth.me.email) return "未绑定";
   return auth.me.email;
 });
+const hasPassword = computed(() => auth.me?.has_password !== false);
 const strength = computed(() => {
   const value = newPassword.value;
   const length = [...value].length;
@@ -74,7 +75,7 @@ const panelTitle = computed(() => {
   if (panel.value === "passkey") return "通行密钥";
   if (panel.value === "totp") return "验证器";
   if (panel.value === "email") return "邮箱";
-  return "密码";
+  return hasPassword.value ? "密码" : "设置密码";
 });
 const sectionTitle = computed(() => {
   if (section.value === "profile") return "个人信息";
@@ -297,12 +298,13 @@ async function savePassword() {
     passwordError.value = "两次输入的新密码不一致";
     return;
   }
+  const firstSet = !hasPassword.value;
   busy.value = true;
   try {
     const body = await api<{ revoked_other_sessions: number }>("/api/me/password", {
       method: "POST",
       body: JSON.stringify({
-        current_password: currentPassword.value,
+        ...(firstSet ? {} : { current_password: currentPassword.value }),
         new_password: newPassword.value,
       }),
     });
@@ -310,7 +312,14 @@ async function savePassword() {
     newPassword.value = "";
     confirmPassword.value = "";
     const others = body.revoked_other_sessions;
-    ElMessage.success(others > 0 ? `密码已更新，另外 ${others} 个登录已退出` : "密码已更新，当前登录仍然有效");
+    ElMessage.success(
+      firstSet
+        ? "密码已设置，当前登录仍然有效"
+        : others > 0
+          ? `密码已更新，另外 ${others} 个登录已退出`
+          : "密码已更新，当前登录仍然有效",
+    );
+    await refreshSession();
   } catch (error) {
     passwordError.value = explain(error);
   } finally {
@@ -454,13 +463,13 @@ onMounted(async () => {
           </div>
 
           <div v-else class="editor">
-            <p class="muted">其它设备会被退出，本机保持登录。</p>
-            <label class="field">
+            <p class="muted">{{ hasPassword ? "其它设备会被退出，本机保持登录。" : "这个账号还没有密码。设置后可以用密码登录。其它设备会被退出，本机保持登录。" }}</p>
+            <label v-if="hasPassword" class="field">
               <span>当前密码</span>
               <el-input v-model="currentPassword" type="password" show-password placeholder="当前密码" autocomplete="current-password" />
             </label>
             <label class="field">
-              <span>新密码</span>
+              <span>{{ hasPassword ? "新密码" : "密码" }}</span>
               <el-input v-model="newPassword" type="password" show-password placeholder="新密码，至少 8 位" autocomplete="new-password" />
               <span class="meter" :data-level="strength" aria-hidden="true"><span></span></span>
               <span class="muted">{{ passwordHint }}</span>
@@ -472,7 +481,7 @@ onMounted(async () => {
             </label>
             <p v-if="passwordError" class="form-error" role="alert">{{ passwordError }}</p>
             <div class="form-actions">
-              <el-button type="primary" native-type="button" :disabled="busy" @click="savePassword">更新密码</el-button>
+              <el-button type="primary" native-type="button" :disabled="busy" @click="savePassword">{{ hasPassword ? "更新密码" : "设置密码" }}</el-button>
             </div>
           </div>
         </template>
@@ -523,7 +532,7 @@ onMounted(async () => {
               </button>
               <button type="button" class="set-row" aria-label="密码" @click="openPanel('password')">
                 <span>密码</span>
-                <span class="set-value">更改</span>
+                <span class="set-value">{{ hasPassword ? "更改" : "未设置" }}</span>
                 <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
             </div>

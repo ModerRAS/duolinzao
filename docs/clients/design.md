@@ -16,7 +16,7 @@ UI 参考：[docs/ui](../ui/README.md)
 | 工作台 | 食堂 / 管理员 / 总管工作台**不做横屏**；日后另行设计为**竖屏工作台**，届时补充本文 |
 | 登录方式 | 与 Web **同步**：Passkey / **认证器 TOTP** / **邮箱 OTP**（按站点开关）/ 密码，Passkey 默认优先；邮箱登录**仅**验证码，**不再**使用 magic link / App Links；邮箱 OTP 有效 **10 分钟**，一次性靠**记下已用 TOTP 时间窗（step/timestamp）**——同窗再验拒绝；旧 magic link **consume-on-use**；`email-otp/request` **一律 accepted**（无账号/邮箱不发信） |
 | 账户设置 | 与 Web **同步**：绑定邮箱、TOTP 设置等 |
-| 注册 | `/api/register` 成功即返回登录会话（**需改服务端**，§4.5）；Web 与 App 相同：随后进入 Passkey 绑定（可暂时跳过 / 不支持自动跳过）；**不走**新设备确认 |
+| 注册 | `/api/register` 成功即返回登录会话，但不进入员工端，直到通行密钥绑定成功。设备不能创建、用户取消或创建失败时才要求至少 8 位密码。**不走**新设备确认。用户可见文案写「通行密钥」 |
 | 改包方式 | 修改**已构建的通用 APK**（替换 `assets/server.json` → zipalign → apksigner 用部署方 keystore 重签 → 生成 `version.json`），**不从源码重编**；`versionCode` / `versionName` **沿用通用 APK 原值**，部署方不覆盖 |
 | 最低版本 | **minSdk 30（Android 11）**，理由见 §8.4 |
 | Passkey | 使用 **Android Credential Manager / 平台 API**，**不用 WebView 套 WebAuthn 页** |
@@ -111,8 +111,8 @@ UI 参考：[docs/ui](../ui/README.md)
 ### 2.2 第一版范围（仅 Android 员工端，完整功能）
 
 1. **登录**：与 Web 同步（Passkey / 认证器 TOTP / 邮箱 OTP / 密码）；默认 Passkey（Credential Manager）；无可用凭据 / 无凭据提供方或 GMS / 取消 / 失败时自动回退密码（§3.2 / §3.2.4）
-2. **邀请注册**：注册成功即登录，随后直接绑定 Passkey（§3.2.3）
-2a. **账户设置**：与 Web 同步。`username` 只读；显示名 `PUT /api/me/display-name`（`GET /api/me` 带 `display_name`，界面优先显示名）；绑定邮箱 `/api/me/email`；TOTP `/api/me/totp/setup|confirm`；Passkey 注册 `/api/passkeys/register/start|finish` 与解绑；自助改密 `POST /api/me/password`（校验当前密码，保留当前会话，吊销其它会话）；退出 `POST /api/session/logout`。总管找回仍吊销全部会话，不在此页
+2. **邀请注册**：账号 + 邀请码。能创建通行密钥时必须绑定成功才进入；不能创建、用户取消或创建失败时才设置至少 8 位密码（§3.2.3）
+2a. **账户设置**：与 Web 同步。`username` 只读；显示名 `PUT /api/me/display-name`（`GET /api/me` 带 `display_name`，界面优先显示名）；绑定邮箱 `/api/me/email`；TOTP `/api/me/totp/setup|confirm`（注册时不采集）；通行密钥注册 `/api/passkeys/register/start|finish` 与解绑；`POST /api/me/password` 在已有密码时校验当前密码，尚无密码时首次设置不要求当前密码，都保留当前会话并吊销其它会话；退出 `POST /api/session/logout`。总管找回仍吊销全部会话，不在此页
 3. **设备与 Passkey**：App 内绑定、解绑 Passkey；设备列表与移除（`/api/devices*`）
 4. **新设备确认**：新设备登录走确认流程；App 内可批准 / 拒绝其他设备的登录请求（`/api/login-approvals*`）
 5. **首页 / 本周报餐**：`/api/me/home`、`/api/me/meals`，切换报 / 不报（`PUT /api/meals/{date}/{slot}`）
@@ -190,16 +190,16 @@ UI 参考：[docs/ui](../ui/README.md)
 - `POST /api/session/password`，body `{ "username", "password" }` → Set-Cookie。
 - 登录页可保留「使用密码」次要入口，但**默认主按钮 / 首屏动作是 Passkey**，不得把密码表单做成唯一默认主路径。
 
-#### 3.2.3 邀请注册（同步绑定 Passkey；Web 与 App 相同）
+#### 3.2.3 邀请注册（必须绑定通行密钥；Web 与 App 相同）
 
-Web 与 App 共用同一流程与同一服务端改动：
+Web 与 App 共用同一流程：
 
-1. 填用户名、邀请码、密码 → `POST /api/register`（body `{ username, invite_code, password }`）。密码同时作为备用登录方式。
-2. 注册成功即返回登录会话（Set-Cookie；**需改服务端**，见 §4.5），客户端直接进入 Passkey 绑定。
-3. **不走新设备确认**（`/api/login-approvals*`）：注册自动登录时还没有其他可批准的设备。
-4. 设备 / 浏览器支持 Passkey：以绑定 Passkey 为主 / 默认动作（`/api/passkeys/register/start` → 平台 API → `/finish`），同时提供可见的「暂时跳过」。
-5. 不支持 Passkey：自动跳过此步。
-6. 跳过的用户之后可在「设备与 Passkey」补绑。
+1. 填用户名、邀请码 → `POST /api/register`（body `{ username, invite_code }`，`password` 可省略）。成功即返回登录会话（Set-Cookie）。此会话只用于完成绑定；客户端在拿到登录因素之前不进入员工端。
+2. **不走新设备确认**（`/api/login-approvals*`）：注册自动登录时还没有其他可批准的设备。
+3. 设备能创建通行密钥时，必须绑定成功（`/api/passkeys/register/start` → 平台 API → `/finish`）才进入。这一步不能跳过，也不把密码做成并列的第一选项。用户可见文案写「通行密钥」。
+4. 仅当平台没有通行密钥、用户取消，或创建凭证失败时，才进入设置密码。密码至少 8 位，`POST /api/me/password` 只传 `new_password`（此时 `password_hash` 仍为 NULL，不要求当前密码）。
+5. 通行密钥绑定成功后，密码可以保持未设置。之后可在账户设置首次设置密码，也可再绑通行密钥。
+6. 注册不采集 TOTP。TOTP 仍是登录方式（通行密钥之后），并在账户设置里后绑。
 
 #### 3.2.4 邮箱 OTP 登录（Web 与 App；取代 magic link）
 
@@ -247,9 +247,9 @@ Web 与 App 共用同一流程与同一服务端改动：
 | 模板 | GET/POST/PUT | `/api/me/meal-template`、`/api/meal-templates/generate`、`/api/meal-templates/:id`（`/slots`、`/apply`） | |
 | 评分 | GET / POST | `/api/me/score-targets`、`/api/scores` | −2～+2，菜/饭/汤分开 |
 | 通知 | GET / POST | `/api/notifications`、`/api/notifications/:id/read` | |
-| 注册 | POST | `/api/register` | 成功即登录，见 §3.2.3 |
+| 注册 | POST | `/api/register` | 成功即发会话；进入前必须绑通行密钥，失败才设密码。见 §3.2.3 |
 | 登录方式 | GET / POST | `/api/session/methods`（含 `email_otp`）、`/api/session/totp`、`/api/session/email-otp/request`、`/api/session/email-otp/verify`（**取代** magic-link） | 与 Web 同步；§3.2.4 / §4.5 |
-| 账户设置 | GET / PUT / POST | `/api/me`（含 `display_name`）、`/api/me/display-name`、`/api/me/email`、`/api/me/totp/setup`、`/api/me/totp/confirm`、`/api/me/password`、`/api/passkeys/register/start`、`/api/passkeys/register/finish`、`/api/session/logout` | 与 Web 同步。自助改密保留当前会话并吊销其它会话 |
+| 账户设置 | GET / PUT / POST | `/api/me`（含 `display_name`、`has_password`、`has_passkey`）、`/api/me/display-name`、`/api/me/email`、`/api/me/totp/setup`、`/api/me/totp/confirm`、`/api/me/password`、`/api/passkeys/register/start`、`/api/passkeys/register/finish`、`/api/session/logout` | 与 Web 同步。已有密码时改密校验当前密码；尚无密码时首次设置不要求当前密码。都保留当前会话并吊销其它会话 |
 | 设备 | GET / DELETE | `/api/devices`、`/api/devices/:id` | |
 | 新设备确认 | POST / GET | `/api/login-approvals*` | 见 §3.2.1 |
 
@@ -321,8 +321,8 @@ APK 内例如 `assets/server.json`：
 
 ### 4.5 其他服务端改动（第一版必需）
 
-1. **`POST /api/register` 成功即登录**：注册成功时建立会话并返回 Set-Cookie（`dlz_session`），与登录接口一致；Web 与 App 共用。注册自动登录**不**进入新设备确认流。
-2. **注册后 Passkey 绑定步骤（Web 与 App）**：注册成功进绑定页；支持则默认绑定且可「暂时跳过」，不支持则自动跳过（产品流，主要改前端；服务端已有 passkey register 接口）。
+1. **`POST /api/register` 成功即发会话**：注册成功时建立会话并返回 Set-Cookie（`dlz_session`），与登录接口一致；Web 与 App 共用。`password` 可省略，省略则 `password_hash` 为 NULL。注册自动登录**不**进入新设备确认流。
+2. **注册后必须绑定通行密钥（Web 与 App）**：能创建时必须绑定成功才进入员工端，不能暂时跳过，密码不是并列选项。平台没有通行密钥、用户取消或创建失败时，用 `POST /api/me/password` 首次设置至少 8 位密码后再进入。通行密钥成功则密码可以保持未设置。用户可见文案写「通行密钥」。注册不采集 TOTP。
 3. **邮箱登录改为 OTP（取代 magic link）**：
    - 新增 `POST /api/session/email-otp/request` 与 `POST /api/session/email-otp/verify`（路径可微调，须 Web / App 共用）；参数见 §3.2.4（6 位、与认证器 TOTP 同算法风格、有效 10 分钟、重发 ≥60s、5 次失败锁 15 分钟）。
    - `GET /api/session/methods`：邮箱开启时返回 **`email_otp`**，**不再**返回 `magic_link`。
@@ -437,7 +437,7 @@ docs/clients/
 9. minSdk 30（Android 11）。
 10. 卓易通不作交付目标，但核心流程不依赖仅 GMS 能力。
 11. 登录方式与账户设置与 Web 同步；邮箱登录**仅** OTP（Web / App 相同），废除 magic link / App Links 登录；认证器 TOTP 仍独立保留。
-12. 注册接口成功即登录（需改服务端）；Web 与 App 相同：随后 Passkey 绑定（可暂时跳过 / 不支持自动跳过）；注册自动登录不走新设备确认。
+12. 注册接口成功即发会话；Web 与 App 相同：能创建通行密钥时必须绑定成功才进入，不能跳过。设备不能创建、用户取消或创建失败时才要求至少 8 位密码。注册自动登录不走新设备确认。注册不采集 TOTP。
 13. 持有工作台角色的账号：第一版进员工端，下一阶段（竖屏工作台）处理。
 14. `version.json` 的 `versionCode` / `versionName` 沿用通用 APK，部署方不覆盖。
 15. 邮箱 OTP（有效 10 分钟）/ 认证器 TOTP：校验成功后记下已用 TOTP 时间窗（step / timestamp），同窗再验拒绝；切换期残留 magic link token 为 consume-on-use。`email-otp/request` 一律 accepted（防枚举），无账号或未绑邮箱不发信。
@@ -461,3 +461,4 @@ docs/clients/
 | 2026-10-20 | 修订：账户设置清单与现 Web 对齐：显示名、只读账号、Passkey 后绑、TOTP、邮箱、自助改密（保留当前会话并吊销其它会话）、退出。总管找回仍吊销全部会话 |
 | 2026-10-20 | 修订：已实现注册即登录与 email-otp（服务端 `POST /api/register` 直接下发会话；`email-otp/request|verify` 取代 magic-link；`methods` 返回 `email_otp`；认证器 TOTP 同窗重放拒绝） |
 | 2026-10-20 | 修订：Android 员工端初版实现（`clients/android/`，mock 可离线演示 + 真机验证；对接服务端 email-otp/注册即登录） |
+| 2026-11-03 | 修订：首次注册必须绑定通行密钥才能进入；不能暂时跳过。仅当通行密钥不可用、用户取消或创建失败时才要求至少 8 位密码。通行密钥成功后密码可空。尚无密码时可首次设置。界面写「通行密钥」。注册不采集 TOTP |

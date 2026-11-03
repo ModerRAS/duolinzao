@@ -1,6 +1,7 @@
 package com.duolinzao.app.ui
 
 import android.app.Activity
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -28,8 +29,9 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 
 /**
- * 邀请注册：成功即登录（服务端 Set-Cookie），随后绑定 Passkey（可跳过/不支持自动跳过）。
- * 不走新设备确认。
+ * 邀请注册：账号 + 邀请码。能创建通行密钥时必须绑定成功才进入；
+ * 设备不支持、用户取消或创建失败时，改为必填至少 8 位密码。
+ * 不走新设备确认。TOTP 不在这一步设置。
  */
 @Composable
 fun RegisterScreen(onDone: () -> Unit, onBack: () -> Unit) {
@@ -39,24 +41,41 @@ fun RegisterScreen(onDone: () -> Unit, onBack: () -> Unit) {
     var invite by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
-    var bindState by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val existing = Session.me.value
+    var step by remember {
+        mutableStateOf(
+            if (existing != null && !existing.has_password && !existing.has_passkey) "passkey" else "form",
+        )
+    }
 
-    suspend fun bindPasskeyOrSkip() {
-        try {
-            val activity = context as Activity
-            val started = Session.repo.passkeyRegisterStart()
-            val requestJson = started.publicKey?.let {
-                Json.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), it)
-            }.orEmpty()
-            val credential = PasskeyHelper.createPasskey(activity, requestJson)
-            if (credential == null) {
-                bindState = "此设备不支持通行密钥，已跳过（可在「我的 → 设备与通行密钥」补绑）"
-            } else {
-                Session.repo.passkeyRegisterFinish(started.challenge_id, credential, "本机")
-                bindState = "通行密钥绑定成功"
+    BackHandler(enabled = step != "form") { }
+
+    suspend fun tryBind(): Boolean {
+        val activity = context as? Activity ?: return false
+        val started = Session.repo.passkeyRegisterStart()
+        val requestJson = started.publicKey?.let {
+            Json.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), it)
+        }.orEmpty()
+        if (requestJson.isBlank()) return false
+        val credential = PasskeyHelper.createPasskey(activity, requestJson) ?: return false
+        Session.repo.passkeyRegisterFinish(started.challenge_id, credential, "本机")
+        Session.setMe(Session.repo.me())
+        return true
+    }
+
+    fun bindThenEnter() {
+        scope.launch {
+            busy = true
+            error = null
+            try {
+                if (tryBind()) onDone() else step = "password"
+            } catch (e: Exception) {
+                error = if (e is ApiException) e.message else "通行密钥没有完成，请设置密码"
+                step = "password"
+            } finally {
+                busy = false
             }
-        } catch (_: Exception) {
-            bindState = "通行密钥绑定跳过（可在「我的 → 设备与通行密钥」补绑）"
         }
     }
 
@@ -64,32 +83,72 @@ fun RegisterScreen(onDone: () -> Unit, onBack: () -> Unit) {
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("邀请码注册", style = MaterialTheme.typography.headlineMedium)
-        DlTextField(username, { username = it }, "账号")
-        DlTextField(invite, { invite = it }, "邀请码")
-        DlTextField(password, { password = it }, "密码（至少 8 位）", password = true)
-        DlPrimaryButton("注册并登录") {
-            scope.launch {
-                error = null
-                try {
-                    Session.repo.register(username, invite, password)
-                    try {
-                        Session.setMe(Session.repo.me())
-                    } catch (_: Exception) {
-                        // 旧服务端注册不带会话：回退一次密码登录。
-                        Session.repo.loginPassword(username, password)
-                        Session.setMe(Session.repo.me())
+        when (step) {
+            "passkey" -> {
+                Text("绑定通行密钥", style = MaterialTheme.typography.headlineMedium)
+                Text("要先绑定通行密钥才能进入。这台设备可以创建通行密钥时，不能改用密码跳过。")
+                DlPrimaryButton("绑定通行密钥", enabled = !busy) { bindThenEnter() }
+                if (busy) Text("正在唤起通行密钥…")
+            }
+            "password" -> {
+                Text("设置密码", style = MaterialTheme.typography.headlineMedium)
+                Text("通行密钥现在用不了（设备不支持、已取消或创建失败）。请设置至少 8 位密码后再进入。")
+                DlTextField(password, { password = it }, "密码（至少 8 位）", password = true)
+                DlPrimaryButton("设置密码并进入", enabled = !busy) {
+                    scope.launch {
+                        busy = true
+                        error = null
+                        try {
+                            if (password.length < 8) {
+                                error = "密码至少 8 个字符"
+                            } else {
+                                Session.repo.changePassword("", password)
+                                Session.setMe(Session.repo.me())
+                                onDone()
+                            }
+                        } catch (e: Exception) {
+                            error = if (e is ApiException) e.message else "密码设置失败"
+                        } finally {
+                            busy = false
+                        }
                     }
-                    bindPasskeyOrSkip()
-                    onDone()
-                } catch (e: Exception) {
-                    error = if (e is ApiException) e.message else "注册失败"
                 }
+                TextButton(onClick = { step = "passkey" }, enabled = !busy) { Text("重试通行密钥") }
+            }
+            else -> {
+                Text("邀请码注册", style = MaterialTheme.typography.headlineMedium)
+                DlTextField(username, { username = it }, "账号")
+                DlTextField(invite, { invite = it }, "邀请码")
+                DlPrimaryButton("注册并登录", enabled = !busy) {
+                    scope.launch {
+                        busy = true
+                        error = null
+                        try {
+                            Session.repo.register(username, invite, null)
+                            try {
+                                Session.setMe(Session.repo.me())
+                            } catch (_: Exception) {
+                                error = "注册未完成，请重试"
+                                return@launch
+                            }
+                            step = "passkey"
+                            val bound = try {
+                                tryBind()
+                            } catch (_: Exception) {
+                                false
+                            }
+                            if (bound) onDone() else step = "password"
+                        } catch (e: Exception) {
+                            error = if (e is ApiException) e.message else "注册失败"
+                        } finally {
+                            busy = false
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = onBack) { Text("返回登录") }
             }
         }
-        if (bindState != null) Text(bindState!!)
         ErrorLine(error)
-        Spacer(Modifier.height(8.dp))
-        TextButton(onClick = onBack) { Text("返回登录") }
     }
 }

@@ -30,16 +30,16 @@ flowchart LR
 | 方法 | 路径 | 行为 |
 |------|------|------|
 | PUT | `/api/me/display-name` | `{ display_name }`，可空字符串表示清空 |
-| POST | `/api/me/password` | `{ current_password, new_password }`；成功返回吊销的其它会话数，不换当前 cookie |
+| POST | `/api/me/password` | `{ new_password }`，已有密码时再带 `current_password`。尚无哈希时忽略当前密码。成功返回吊销的其它会话数，不换当前 cookie |
 | POST | `/api/passkeys/register/start\|finish` | 已有接口。展示名用显示名，登录名仍是账号 |
 | POST | `/api/me/totp/setup\|confirm` | 已有接口 |
 | PUT | `/api/me/email` | 已有接口。邮箱能力关闭时拒绝 |
 | POST | `/api/session/logout` | 已有接口。只吊销当前会话 |
 | POST | `/api/admin/recovery` | 保持原行为。`reset_password` 吊销全部会话 |
 
-自助改密在事务里锁定账号行、校验当前密码、更新 Argon2id 哈希、吊销 `id <> 当前会话` 的未撤销会话，并作废未消费 magic link。审计动作是 `display_name_update` 与 `password_change`，不记密码。
+自助改密在事务里锁定账号行。已有哈希时先校验当前密码，再拒绝与当前密码相同的新密码，再检查至少 8 位。尚无哈希时不要求当前密码，只检查至少 8 位。成功后更新 Argon2id 哈希、吊销 `id <> 当前会话` 的未撤销会话，并作废未消费 magic link。审计动作是 `display_name_update` 与 `password_change`，摘要带 `first_set`，不记密码。含 `session` 的摘要键会被审计脱敏剥掉。
 
-当前密码错误写入与登录相同的用户键和 IP 键失败窗。
+已有密码时，当前密码错误写入与登录相同的用户键和 IP 键失败窗。
 
 ## 前端
 

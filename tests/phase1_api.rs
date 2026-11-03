@@ -2242,6 +2242,342 @@ async fn phase1_acceptance() {
 }
 
 #[tokio::test]
+async fn register_password_optional_and_first_set() {
+    let _gate = GATE.lock().await;
+    let api = prepare().await;
+    let super_token = must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "root", "password": "root-password-1"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "super login",
+    )
+    .token();
+
+    async fn invite(api: &Api, super_token: &str) -> String {
+        must(
+            api.call(
+                "POST",
+                "/api/admin/invites",
+                Some(super_token),
+                Some(json!({"max_uses": 1})),
+                None,
+                None,
+            )
+            .await,
+            StatusCode::CREATED,
+            "invite",
+        )
+        .json()["code"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn hash_of(api: &Api, username: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT password_hash FROM account WHERE username = $1")
+            .bind(username)
+            .fetch_one(&api.pool)
+            .await
+            .unwrap()
+    }
+
+    let code = invite(&api, &super_token).await;
+    let weak = api
+        .call(
+            "POST",
+            "/api/register",
+            None,
+            Some(json!({"username": "weak-user", "invite_code": code, "password": "short"})),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(weak.status, StatusCode::BAD_REQUEST);
+    assert_eq!(weak.json()["error"], "password_weak");
+
+    // 短密码不能吃掉邀请码。省略 password、空串、空白都写成 NULL。
+    let registered = must(
+        api.call(
+            "POST",
+            "/api/register",
+            None,
+            Some(json!({"username": "nopass", "invite_code": code})),
+            Some("ua-nopass"),
+            None,
+        )
+        .await,
+        StatusCode::CREATED,
+        "register without password",
+    );
+    assert_eq!(registered.json()["ok"], true);
+    let token = registered.token();
+    assert!(hash_of(&api, "nopass").await.is_none());
+    let me = must(
+        api.call("GET", "/api/me", Some(&token), None, None, None)
+            .await,
+        StatusCode::OK,
+        "me without password",
+    )
+    .json();
+    assert_eq!(me["has_password"], false);
+    assert_eq!(me["has_passkey"], false);
+    let denied = api
+        .call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "nopass", "password": "password-1"})),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(denied.status, StatusCode::BAD_REQUEST);
+    assert_eq!(denied.json()["error"], "login_failed");
+
+    let still_weak = api
+        .call(
+            "POST",
+            "/api/me/password",
+            Some(&token),
+            Some(json!({"new_password": "short"})),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(still_weak.status, StatusCode::BAD_REQUEST);
+    assert_eq!(still_weak.json()["error"], "password_weak");
+    assert!(hash_of(&api, "nopass").await.is_none());
+
+    let set = must(
+        api.call(
+            "POST",
+            "/api/me/password",
+            Some(&token),
+            Some(json!({"new_password": "password-1"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "first set password",
+    );
+    assert_eq!(set.json()["revoked_other_sessions"], 0);
+    assert!(set.cookie.is_none());
+    must(
+        api.call("GET", "/api/me", Some(&token), None, None, None)
+            .await,
+        StatusCode::OK,
+        "session kept after first set",
+    );
+    let me = must(
+        api.call("GET", "/api/me", Some(&token), None, None, None)
+            .await,
+        StatusCode::OK,
+        "has password",
+    )
+    .json();
+    assert_eq!(me["has_password"], true);
+    assert!(hash_of(&api, "nopass")
+        .await
+        .unwrap()
+        .starts_with("$argon2"));
+    let summary: Value = sqlx::query_scalar(
+        "SELECT summary FROM audit_log WHERE actor_username = $1 AND action = 'password_change' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind("nopass")
+    .fetch_one(&api.pool)
+    .await
+    .unwrap();
+    assert_eq!(summary["first_set"], true);
+    assert!(!summary.to_string().contains("password-1"));
+
+    let other = must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "nopass", "password": "password-1"})),
+            Some("ua-nopass-2"),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "login after first set",
+    )
+    .token();
+    let forgot_current = api
+        .call(
+            "POST",
+            "/api/me/password",
+            Some(&token),
+            Some(json!({"new_password": "password-2"})),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(forgot_current.status, StatusCode::BAD_REQUEST);
+    assert_eq!(forgot_current.json()["error"], "password_incorrect");
+    let changed = must(
+        api.call(
+            "POST",
+            "/api/me/password",
+            Some(&token),
+            Some(json!({"current_password": "password-1", "new_password": "password-2"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "change after first set",
+    );
+    assert!(changed.json()["revoked_other_sessions"].as_u64().unwrap() >= 1);
+    must(
+        api.call("GET", "/api/me", Some(&token), None, None, None)
+            .await,
+        StatusCode::OK,
+        "setter session kept",
+    );
+    must(
+        api.call("GET", "/api/me", Some(&other), None, None, None)
+            .await,
+        StatusCode::UNAUTHORIZED,
+        "other session revoked",
+    );
+
+    let blank_code = invite(&api, &super_token).await;
+    let blank = must(
+        api.call(
+            "POST",
+            "/api/register",
+            None,
+            Some(json!({"username": "blankpw", "invite_code": blank_code, "password": ""})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::CREATED,
+        "empty password omitted",
+    );
+    let blank_me = must(
+        api.call("GET", "/api/me", Some(&blank.token()), None, None, None)
+            .await,
+        StatusCode::OK,
+        "blank me",
+    )
+    .json();
+    assert_eq!(blank_me["has_password"], false);
+    assert_eq!(blank_me["has_passkey"], false);
+
+    let space_code = invite(&api, &super_token).await;
+    let spaced = must(
+        api.call(
+            "POST",
+            "/api/register",
+            None,
+            Some(json!({"username": "spacepw", "invite_code": space_code, "password": "   "})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::CREATED,
+        "whitespace password omitted",
+    );
+    assert_eq!(
+        must(
+            api.call("GET", "/api/me", Some(&spaced.token()), None, None, None)
+                .await,
+            StatusCode::OK,
+            "space me",
+        )
+        .json()["has_password"],
+        false
+    );
+    assert_eq!(
+        must(
+            api.call("GET", "/api/me", Some(&spaced.token()), None, None, None)
+                .await,
+            StatusCode::OK,
+            "space me passkey",
+        )
+        .json()["has_passkey"],
+        false
+    );
+
+    let with_code = invite(&api, &super_token).await;
+    let with_password = must(
+        api.call(
+            "POST",
+            "/api/register",
+            None,
+            Some(json!({
+                "username": "withpw",
+                "invite_code": with_code,
+                "password": "password-1"
+            })),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::CREATED,
+        "register with password",
+    );
+    assert_eq!(
+        must(
+            api.call(
+                "GET",
+                "/api/me",
+                Some(&with_password.token()),
+                None,
+                None,
+                None,
+            )
+            .await,
+            StatusCode::OK,
+            "with password me",
+        )
+        .json()["has_password"],
+        true
+    );
+    assert_eq!(
+        must(
+            api.call(
+                "GET",
+                "/api/me",
+                Some(&with_password.token()),
+                None,
+                None,
+                None,
+            )
+            .await,
+            StatusCode::OK,
+            "with password still no passkey",
+        )
+        .json()["has_passkey"],
+        false
+    );
+    must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "withpw", "password": "password-1"})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "login with registered password",
+    );
+}
+
+#[tokio::test]
 async fn csrf_gate_and_security_headers() {
     let _gate = GATE.lock().await;
     let api = prepare().await;

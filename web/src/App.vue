@@ -85,6 +85,10 @@ const WORKBENCH_ROLES = ["canteen", "admin", "super_admin"];
 const hasWorkbench = computed(
   () => auth.me?.roles.some((item) => WORKBENCH_ROLES.includes(item.role)) || hasLandscape.value,
 );
+// 注册已发会话，但还没有通行密钥也没有密码时，不能进业务界面。
+const needsFactor = computed(
+  () => Boolean(auth.me && auth.me.has_password === false && auth.me.has_passkey === false),
+);
 
 // 窄屏只看 viewport（matchMedia），不用 UA；断点见 narrow.ts 注释。
 const isNarrow = useNarrow();
@@ -200,7 +204,7 @@ onMounted(async () => {
 
 <template>
   <div v-if="!auth.ready" class="boot">正在连接…</div>
-  <LoginPage v-else-if="!auth.me" @enter="enter" />
+  <LoginPage v-else-if="!auth.me || needsFactor" :enrolling="needsFactor" @enter="enter" />
   <div v-else-if="!hasWorkbench" class="solo">
     <EmployeePage />
   </div>

@@ -15,6 +15,7 @@ import {
   ensureDishes,
   ensureLoggedIn,
   ensureSelection,
+  finishRegisterWithPassword,
   flipOverrideRow,
   lastDenial,
   loginSession,
@@ -119,9 +120,10 @@ async function registerWithInvite(page: any, username: string) {
   await page.context().clearCookies();
   await page.goto("/");
   await page.getByRole("button", { name: "有邀请码，去注册" }).click();
+  await expect(page.getByRole("heading", { name: "注册" })).toBeVisible();
+  await expect(page.getByPlaceholder(/密码/)).toHaveCount(0);
   await page.getByPlaceholder("账号").fill(username);
   await page.getByPlaceholder("邀请码").fill(adminInvite);
-  await page.getByPlaceholder("密码（至少 8 位）").fill("E2e-adm-reg1!");
   await page.getByRole("button", { name: "注册并登录" }).click();
 }
 
@@ -143,6 +145,8 @@ Given("管理员生成一张可用{int}次的邀请码", async ({ }, n: number) 
 When("第{int}位新用户使用该邀请码完成注册", async ({ page }, _n: number) => {
   regUser = uniqueTag("adm_");
   await registerWithInvite(page, regUser);
+  await expect(page.getByRole("heading", { name: "绑定通行密钥" })).toBeVisible({ timeout: 10000 });
+  await finishRegisterWithPassword(page, "E2e-adm-reg1!");
   await expect(page.locator(".emp")).toBeVisible({ timeout: 10000 });
 });
 
