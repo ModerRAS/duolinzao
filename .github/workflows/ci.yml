@@ -235,14 +235,18 @@ jobs:
             echo "::notice::仓库级 var DLZ_DOMAIN 未设，prod 包用 https://example.com 占位"
             PROD_URL="https://example.com"
           fi
-          STAGING_URL="https://${STAGING_DOMAIN:-}"
-          if [ -z "${STAGING_DOMAIN:-}" ]; then
-            echo "::notice::仓库级 var STAGING_DLZ_DOMAIN 未设，staging 包用 https://example.com 占位"
-            STAGING_URL="https://example.com"
-          fi
           rm -rf app-bundle && mkdir -p app-bundle/prod app-bundle/staging
           bash clients/android/scripts/inject-server-url.sh "$PROD_URL" "$UNIVERSAL" app-bundle/prod/duolinzao.apk
-          bash clients/android/scripts/inject-server-url.sh "$STAGING_URL" "$UNIVERSAL" app-bundle/staging/duolinzao.apk
+          # staging 绝不回落 example.com：缺域名就跳过这一份并告警（连不上服务器、
+          # 通行密钥仪式起不来，是比缺包更难查的故障）。.gitkeep 只为让空目录进 artifact，
+          # 否则 image job 的 Dockerfile COPY 找不到目录。
+          if [ -z "${STAGING_DOMAIN:-}" ]; then
+            echo "::warning title=staging APK 未生成::仓库级 var STAGING_DLZ_DOMAIN 未设，已跳过 staging 包（绝不静默写 example.com）。请设 STAGING_DLZ_DOMAIN=staging.<生产域名>（仓库级 Variables；environment 级 android-apk job 看不见）"
+            : > app-bundle/staging/.gitkeep
+          else
+            echo "staging APK baseUrl=https://${STAGING_DOMAIN}"
+            bash clients/android/scripts/inject-server-url.sh "https://${STAGING_DOMAIN}" "$UNIVERSAL" app-bundle/staging/duolinzao.apk
+          fi
           ls -la app-bundle/prod app-bundle/staging
       - name: 上传产物（供 image job 打进镜像）
         uses: actions/upload-artifact@v4
@@ -330,10 +334,15 @@ jobs:
           SHA_JSON="$(jq -r .sha256 /tmp/version.json)"
           SHA_APK="$(docker run --rm --entrypoint sha256sum dlz-apk-smoke:ci /app/static/app/duolinzao.apk | cut -d' ' -f1)"
           [ "$SHA_JSON" = "$SHA_APK" ] || { echo "sha 不一致：json=$SHA_JSON apk=$SHA_APK"; exit 1; }
-          # staging 份同样自洽（version.json 合法、包存在）。
-          docker run --rm --entrypoint /bin/sh dlz-apk-smoke:ci -c 'cat /app/static/app-staging/version.json' | \
-            jq -e '.versionCode > 0 and (.sha256 | length == 64) and (.url | startswith("/app/"))'
-          docker run --rm --entrypoint /bin/sh dlz-apk-smoke:ci -c 'test -s /app/static/app-staging/duolinzao.apk && echo STAGING_APK_OK'
+          # staging 份同样自洽（version.json 合法、包存在）。未配 STAGING_DLZ_DOMAIN 时
+          # android-apk job 会跳过 staging 包（目录里只有 .gitkeep），这时只提示不阻断。
+          if docker run --rm --entrypoint /bin/sh dlz-apk-smoke:ci -c 'test -f /app/static/app-staging/version.json'; then
+            docker run --rm --entrypoint /bin/sh dlz-apk-smoke:ci -c 'cat /app/static/app-staging/version.json' | \
+              jq -e '.versionCode > 0 and (.sha256 | length == 64) and (.url | startswith("/app/"))'
+            docker run --rm --entrypoint /bin/sh dlz-apk-smoke:ci -c 'test -s /app/static/app-staging/duolinzao.apk && echo STAGING_APK_OK'
+          else
+            echo "::warning::镜像内无 staging 包（STAGING_DLZ_DOMAIN 未配），跳过 staging 冒烟；部署后 staging 的 /app/version.json 会是 404"
+          fi
           # 服务端签名工具链自带（超管「签名发布」用）：
           docker run --rm --entrypoint apksigner dlz-apk-smoke:ci --version
           echo "APK 冒烟通过"

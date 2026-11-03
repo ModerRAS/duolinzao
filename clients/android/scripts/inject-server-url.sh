@@ -14,6 +14,13 @@ fi
 BASE_URL="$1"
 APK="$2"
 OUT="${3:-${APK%.apk}-site.apk}"
+
+# 空值或只有 scheme 的 URL 会让 App 拿到空 baseUrl（连不上、通行密钥起不来），
+# 且包已经打出来了很难查：在这里直接拒。
+case "$BASE_URL" in
+  http://?* | https://?*) ;;
+  *) echo "BASE_URL 非法，需要 http(s)://host（现在是 '$BASE_URL'）" >&2; exit 1 ;;
+  esac
 OUT_DIR="$(cd "$(dirname "$OUT")" && pwd)"
 OUT_BASE="$(basename "$OUT")"
 

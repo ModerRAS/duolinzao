@@ -147,13 +147,29 @@ staging 的 5 个 secret（名字带 `stg` 前缀，不与生产冲突）由 `de
 
 ### 6.3 仓库侧配置
 
-建 environment `staging`（**不加** Required reviewers，自动部署），在该 environment 里设以下三项（**都是 environment 级**，任一缺失 `deploy-staging` job 就**跳过并打 notice**，master 保持绿色）：
+建 environment `staging`（**不加** Required reviewers，自动部署）。注意作用域不一样：
+
+- `STAGING_DLZ_DOMAIN` 必须设成**仓库级 Variables**（`Settings → Secrets and variables → Actions → Variables`），
+  **不要**只设在 environment 里。`android-apk` job 没有声明 environment（它不该拿 staging 的 secret），
+  因此**看不见 environment 级变量**；只设在 environment 时它会当成“没配”，再也别静默回落到
+  `https://example.com`——现在缺域名就跳过 staging 包并打 warning（见 7.1）。
+- 两个 secret 设在 environment `staging` 里（只给部署 job 用）。
+
+`deploy-staging` job 声明了 `environment: staging`，而 GitHub 的变量解析是
+**environment → repository → organization** 依次回退，所以仓库级 `STAGING_DLZ_DOMAIN`
+部署 job 照样读得到。任一缺失 `deploy-staging` 就**跳过并打 notice**，master 保持绿色。
 
 | 名称 | 位置 | 示例 | 说明 |
 |---|---|---|---|
-| `STAGING_DLZ_DOMAIN` | environment var | `staging.example.com` | staging 域名；同时用于 Traefik Host 规则与 webauthn rp_id/origin |
+| `STAGING_DLZ_DOMAIN` | **repository var** | `staging.example.com` | staging 域名；同时用于 Traefik Host 规则、webauthn rp_id/origin 与 **staging APK 的 baseUrl** |
 | `STAGING_DEPLOY_PATH` | environment secret | 如 `/opt/duolinzao-staging` | manager 上放 staging stack 的目录，**不得与生产 `DEPLOY_PATH` 相同**（CI 会校验，相同直接拒绝部署；生产路径在 staging 环境不可见时放过） |
 | `STAGING_SUPER_PASSWORD` | environment secret | 强随机密码 | 测试服超管密码，只在 secret 缺失时建一次 |
+
+一行设好（`gh` 已登录时；换成自己的 staging 域名，本仓不自建站点时留空即可）：
+
+```bash
+gh variable set STAGING_DLZ_DOMAIN --repo <owner>/duolinzao --body 'staging.<生产域名>'
+```
 
 其余 SSH 凭据（`DEPLOY_HOST/PORT/USER/SSH_KEY/KNOWN_HOSTS`、`GHCR_PULL_TOKEN`）与 Traefik 三变量复用生产的。
 
@@ -219,6 +235,13 @@ APK 的 `baseUrl` 写死在包内，且更新器要求同源；生产和测试�
   `DLZ_APP_DIR=/app/static/app-staging` 把 `/app/*` 路由指向它（见 `deploy/stack.staging.yml`）。
 - 路由仍是同一个 `/app/*`，靠服务端目录隔离；`version.json` 的 `url` 都是
   `/app/duolinzao.apk`（同源，冒烟步骤会校验）。
+- **缺 `STAGING_DLZ_DOMAIN` 时 CI 不生成 staging 包**（`::warning` 跳过，绝不静默把
+  `https://example.com` 写进包）：连不上服务器、通行密钥仪式起不来的故障比缺包难查得多。
+  这时镜像里 `/app/static/app-staging/` 只有 `.gitkeep`，部署后 staging 的
+  `/app/version.json` 是 404（一眼可见）；补上变量重跑 master 即可。prod 包仍按开源默认
+  用 `https://example.com` 占位（不自建站点的人 `cargo run` / 本地测都不受影响）。
+- `inject-server-url.sh` 自己也会拒绝空/非 `http(s)://` 的 URL（包已打出来后再查出
+  baseUrl 是空的成本太高）。
 
 ### 7.2 版本号
 
@@ -294,3 +317,32 @@ DB 尚未配置 keystore 时：staging/CI 保持绿（`/app/*` 是 CI 未签包�
 - 验证：部署新镜像后 `curl -fsS https://example.com/app/version.json | jq .`
   （期望 `signing` 为 `release`，sha256 与刚构建的包一致），外加服务端日志一条成功记录；
   空库场景应看到 skip 告警、且 `app_signing` 表仍为空（不自动建 key）。
+
+### 7.7 `/.well-known/assetlinks.json`（通行密钥的 Digital Asset Links）
+
+App 用**站点域名当 RP ID** 调系统通行密钥（Credential Manager），Android 会去
+
+```
+https://<域名>/.well-known/assetlinks.json
+```
+
+核对「这个域名 ↔ `com.duolinzao.app` + 证书指纹」的关联（`delegate_permission/common.get_login_creds`）。
+路径必须 **200 + `application/json`**，且不能被 SPA 回退成 `index.html`：拿到 HTML 会被判成
+「无关联」，App 内通行密钥注册/登录直接失败（而且失败得很安静）。
+
+- 由后端**直出**（显式路由，优先于 SPA fallback），**免会话**（系统校验器不带 cookie）。
+- 指纹不写死在仓库里：`certSha256` 由「签名发布」时 `apksigner verify --print-certs` 从
+  **实际发放的包**读出（大写冒号分隔），与服务端当前 release 证书永远一致；换 keystore 后重签即自动更新。
+- 未签名（CI 未签包、还没点「签名发布」）时回 `[]`：合法 JSON =「没有已关联的 App」，
+  不是 404、也不是 HTML。
+- 与登录邮件用的 App Links **无关**（那条线已废弃，见 `docs/clients/design.md` §3.2.4）。
+- 验证（staging 与生产各一次）：
+
+```bash
+curl -fsS -D- https://example.com/.well-known/assetlinks.json | head -20   # 200 + application/json
+curl -fsS https://example.com/.well-known/assetlinks.json | jq .          # 签名后应有 package_name + 指纹
+```
+
+  期望与 `curl -fsS https://example.com/app/version.json | jq .certSha256` 的值一致；
+  App 内通行密钥仍失败时，先用
+  `adb shell pm get-app-links com.duolinzao.app` / `adb logcat | grep -i assetlinks` 看系统侧结论。

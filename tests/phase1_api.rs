@@ -2743,7 +2743,8 @@ async fn app_signing_auto_generate_sign_and_overwrite() {
     std::fs::create_dir_all(&shim).unwrap();
     std::fs::write(
         shim.join("apksigner"),
-        "#!/bin/sh\nif [ \"$1\" = \"verify\" ]; then exit 0; fi\nout=\"\"; prev=\"\";\nfor a in \"$@\"; do if [ \"$prev\" = \"--out\" ]; then out=\"$a\"; fi; prev=\"$a\"; done\neval \"input=\\${$#}\"\ncp \"$input\" \"$out\"\n",
+        // verify --print-certs 输出一段假证书摘要（32 字节 hex），让证书指纹链路可验。
+        "#!/bin/sh\nif [ \"$1\" = \"verify\" ]; then\n  for a in \"$@\"; do if [ \"$a\" = \"--print-certs\" ]; then echo 'Signer #1 certificate SHA-256 digest: abababababababababababababababababababababababababababababababab'; fi; done\n  exit 0\nfi\nout=\"\"; prev=\"\";\nfor a in \"$@\"; do if [ \"$prev\" = \"--out\" ]; then out=\"$a\"; fi; prev=\"$a\"; done\neval \"input=\\${$#}\"\ncp \"$input\" \"$out\"\n",
     )
     .unwrap();
     #[cfg(unix)]
@@ -2791,6 +2792,23 @@ async fn app_signing_auto_generate_sign_and_overwrite() {
             .unwrap();
     assert_eq!(meta["signing"], "release", "{meta}");
     assert_eq!(meta["sha256"], signed["sha256"].as_str().unwrap(), "{meta}");
+    // 证书指纹（Asset Links 用）：来自 apksigner --print-certs，归一化成大写冒号分隔。
+    let cert = meta["certSha256"].as_str().expect("应写入证书指纹").to_string();
+    assert_eq!(cert.len(), 95, "{cert}");
+    assert!(cert.starts_with("AB:AB:AB"), "{cert}");
+    // 站点 `/.well-known/assetlinks.json` 直接取到同一个指纹（免会话、application/json）。
+    let links = must(
+        authed(&app, "GET", "/.well-known/assetlinks.json", &super_token).await,
+        StatusCode::OK,
+        "assetlinks",
+    )
+    .json();
+    assert_eq!(
+        links[0]["target"]["sha256_cert_fingerprints"][0],
+        cert.as_str(),
+        "{links}"
+    );
+    assert_eq!(links[0]["target"]["package_name"], "com.duolinzao.app", "{links}");
     let apk = std::fs::read(app_dir.join("app/duolinzao.apk")).unwrap();
     assert_eq!(apk, b"fake-apk-bytes", "假 apksigner 应原样拷贝");
     {

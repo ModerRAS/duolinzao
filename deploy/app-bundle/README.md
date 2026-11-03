@@ -3,6 +3,9 @@
 `android-apk` job 在每次 CI 构建出未签通用包（按域名各出一份），`image` job 用
 `actions/download-artifact` 拉到这里，再由 Dockerfile 拷进镜像：
 
+- staging 份只在仓库级 var `STAGING_DLZ_DOMAIN` 存在时生成；缺失时 CI 跳过并打
+  warning（绝不静默写 `example.com`），目录里只留 `.gitkeep` → 部署后 staging 的
+  `/app/version.json` 是 404，一眼能看出来。
 - `prod/duolinzao.apk` + `prod/version.json`（`"signing":"unsigned"`）
   → 镜像 `/app/static/app/`（生产默认 `{static_dir}/app`，baseUrl 用仓库级 `DLZ_DOMAIN`）。
 - `staging/duolinzao.apk` + `staging/version.json` → 镜像 `/app/static/app-staging/`

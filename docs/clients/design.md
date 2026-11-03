@@ -204,6 +204,9 @@ Web 与 App 共用同一流程与同一服务端改动：
 #### 3.2.4 邮箱 OTP 登录（Web 与 App；取代 magic link）
 
 邮箱能力开启时，**唯一**的邮箱登录方式是一次性验证码（OTP）。**不再**提供 magic link，也**不**为登录配置 App Links / `assetlinks.json`。
+（注：站点仍托管 `/.well-known/assetlinks.json`，但只为**通行密钥**的 Digital Asset Links：
+`delegate_permission/common.get_login_creds`，由后端签约时自动生成，与邮件登录的 App Links 无关，
+见 `docs/deploy.md` §7.7。）
 
 流程（Web 与 App 相同）：
 
@@ -326,7 +329,8 @@ APK 内例如 `assets/server.json`：
 3. **邮箱登录改为 OTP（取代 magic link）**：
    - 新增 `POST /api/session/email-otp/request` 与 `POST /api/session/email-otp/verify`（路径可微调，须 Web / App 共用）；参数见 §3.2.4（6 位、与认证器 TOTP 同算法风格、有效 10 分钟、重发 ≥60s、5 次失败锁 15 分钟）。
    - `GET /api/session/methods`：邮箱开启时返回 **`email_otp`**，**不再**返回 `magic_link`。
-   - **废弃并移除**（或永久关闭）`/api/session/magic-link/request` 与 `/consume`；登录不再发含链接的邮件，也不再为登录准备 App Links / `assetlinks.json`。
+   - **废弃并移除**（或永久关闭）`/api/session/magic-link/request` 与 `/consume`；登录不再发含链接的邮件，也不再为登录准备 App Links / `assetlinks.json`
+     （通行密钥用的 `/.well-known/assetlinks.json` 除外：那是 RP ID 关联，不是登录链接，见 `docs/deploy.md` §7.7）。
    - **Web 登录页**与 App 一并改为「邮箱验证码」UI，去掉 magic link 入口。
    - **认证器 TOTP**（`/api/session/totp`、`/api/me/totp/*`）保持不变，仍是独立登录方式。
    - 仍**不做短信 OTP**。

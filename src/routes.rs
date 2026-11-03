@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::extract::{ClientIp, CurrentUser, UserAgent};
-use crate::ops::{admin, catalog, meal, session};
+use crate::ops::{admin, app_signing, catalog, meal, session};
 use crate::state::AppState;
 
 /// 写操作第二道闸：状态变更方法必须带自定义头，证明是同源 JS 发起。
@@ -49,6 +49,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         // 部署探针：Traefik/CI 只看连通性，不查库、不鉴权，免 CSRF（GET 豁免）。
         .route("/healthz", get(healthz))
+        // Digital Asset Links：Android/Google 匿名拉取，必须免会话且是 application/json，
+        // 不能被文末的 SPA fallback 吃成 index.html（否则通行密钥判「站点与 App 无关联」）。
+        .route("/.well-known/assetlinks.json", get(assetlinks))
         .route("/api/session/methods", get(methods))
         .route("/api/register", post(register))
         .route("/api/session/password", post(login_password))
@@ -213,6 +216,26 @@ async fn health() -> Json<Value> {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// `/.well-known/assetlinks.json`：指纹取「签名发布」写进 `version.json` 的 release
+/// 证书（`certSha256`），所以永远与实际发放的包一致；未签名时回 `[]`（合法 JSON =
+/// 没有关联的 App）。公开端点：系统校验器不带 cookie。
+async fn assetlinks(State(state): State<AppState>) -> impl IntoResponse {
+    let cert = state
+        .config
+        .resolved_app_dir()
+        .and_then(|dir| std::fs::read_to_string(format!("{dir}/version.json")).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|meta| {
+            meta.get("certSha256")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(app_signing::assetlinks(cert.as_deref())),
+    )
 }
 
 /// 站点自托管 `/app/`（通用 APK 与 version.json，供应用内更新同源拉取）。
@@ -1457,4 +1480,93 @@ async fn export_zip(
         ],
         bytes,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{example_config, AppConfig};
+    use crate::state::{CapturingMailer, ManualClock, ScriptedBackend};
+    use http_body_util::BodyExt;
+    use sqlx::postgres::PgPoolOptions;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    /// 无 DB 的路由测试：AppState 只解析配置（pool 用 lazy，不真连）。
+    fn app_with_static(dir: &std::path::Path) -> Router {
+        let cfg = example_config().replace(
+            "[server]",
+            &format!("[server]\nstatic_dir = \"{}\"", dir.to_str().unwrap()),
+        );
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://duolinzao:duolinzao@127.0.0.1:1/none")
+            .expect("lazy pool");
+        let state = AppState::new(
+            pool,
+            AppConfig::parse(&cfg).expect("config"),
+            Arc::new(ManualClock::new(chrono::Utc::now())),
+            Arc::new(CapturingMailer::default()),
+            Arc::new(ScriptedBackend::failing_then_script()),
+        )
+        .expect("state");
+        router(state)
+    }
+
+    async fn get(app: Router, uri: &str) -> (StatusCode, String, Vec<u8>) {
+        let request = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("user-agent", "phase1-test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.expect("oneshot");
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, content_type, bytes.to_vec())
+    }
+
+    /// `/.well-known/assetlinks.json` 必须自己直出 JSON：不能被 SPA fallback 吃成
+    /// index.html（200 + text/html），否则 Android 认为站点与 App 无关联，App 内通行密钥失败。
+    #[tokio::test]
+    async fn well_known_assetlinks_is_json_not_spa() {
+        let base = std::env::temp_dir().join(format!("dlz-well-known-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("app")).unwrap();
+        std::fs::write(base.join("index.html"), "<html>spa</html>").unwrap();
+        let app = app_with_static(&base);
+
+        // 未签名（无 certSha256）：200 + application/json + 空数组。
+        std::fs::write(base.join("app/version.json"), r#"{"versionCode":3}"#).unwrap();
+        let (status, content_type, bytes) =
+            get(app.clone(), "/.well-known/assetlinks.json").await;
+        assert_eq!(status, StatusCode::OK, "必须 200");
+        assert_eq!(content_type, "application/json", "必须走 JSON 路由");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!([]),
+            "未签名应回空数组"
+        );
+
+        // 签名发布后：指纹来自 version.json 的 certSha256，包名固定。
+        std::fs::write(
+            base.join("app/version.json"),
+            r#"{"versionCode":3,"certSha256":"AB:CD:EF"}"#,
+        )
+        .unwrap();
+        let (status, content_type, bytes) = get(app, "/.well-known/assetlinks.json").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, "application/json");
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body[0]["target"]["package_name"], "com.duolinzao.app", "{body}");
+        assert_eq!(
+            body[0]["target"]["sha256_cert_fingerprints"][0], "AB:CD:EF",
+            "{body}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

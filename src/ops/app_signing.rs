@@ -21,6 +21,46 @@ fn keystore_fingerprint(keystore: &[u8]) -> String {
     hex::encode(Sha256::digest(keystore))
 }
 
+/// App 包名（与 `clients/android/app/build.gradle.kts` 的 `applicationId` 一致）。
+pub const ANDROID_PACKAGE: &str = "com.duolinzao.app";
+
+/// 从 `apksigner verify --print-certs` 的输出取**签名证书**的 SHA-256，归一化成
+/// Android 官方示例的写法（大写、冒号分隔）。keystore 指纹（`keystore_fingerprint`）
+/// 是文件摘要，不能当证书指纹用：Asset Links 比的是证书，写错了 Android 直接判不关联。
+pub fn cert_sha256(print_certs_stdout: &str) -> Option<String> {
+    let raw = print_certs_stdout
+        .lines()
+        .find_map(|line| line.split_once("certificate SHA-256 digest:"))?
+        .1;
+    let digits: String = raw.chars().filter(char::is_ascii_hexdigit).collect();
+    if digits.len() != 64 {
+        return None;
+    }
+    let pairs: Vec<String> = digits
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| String::from_utf8_lossy(pair).to_uppercase())
+        .collect();
+    Some(pairs.join(":"))
+}
+
+/// `/.well-known/assetlinks.json` 的响应体：App 认领站点 RP ID（通行密钥）用的关联。
+/// 与登录邮件用的 App Links 无关（那条线已废弃）。没有 release 证书时回空数组——
+/// 合法 JSON，表示「没有已关联的 App」，而不是让 SPA 回一份 index.html。
+pub fn assetlinks(cert: Option<&str>) -> Value {
+    match cert {
+        Some(cert) => json!([{
+            "relation": ["delegate_permission/common.get_login_creds"],
+            "target": {
+                "namespace": "android_app",
+                "package_name": ANDROID_PACKAGE,
+                "sha256_cert_fingerprints": [cert],
+            },
+        }]),
+        None => json!([]),
+    }
+}
+
 /// 用完即删的临时文件（签名材料落盘中转，重命名/失败都清理）。
 struct TempFile(PathBuf);
 
@@ -423,6 +463,16 @@ async fn sign_staged(state: &AppState, signing: &SigningRow) -> Result<Value, Ap
             "签名后校验未通过，已丢弃",
         ));
     }
+    // 证书指纹给 `/.well-known/assetlinks.json` 用：从**签好的包**里读，永远与实际
+    // 发放的包一致（换 keystore 后重签即自动更新）。取不到不影响发布，只是关联为空。
+    let cert = Command::new(&signer)
+        .arg("verify")
+        .arg("--print-certs")
+        .arg(&out_path)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| cert_sha256(&String::from_utf8_lossy(&out.stdout)));
     let bytes = std::fs::read(&out_path).map_err(|_| AppError::internal())?;
     let sha256 = hex::encode(Sha256::digest(&bytes));
     std::fs::rename(&out_path, &staged_apk).map_err(|_| AppError::internal())?;
@@ -442,6 +492,8 @@ async fn sign_staged(state: &AppState, signing: &SigningRow) -> Result<Value, Ap
                 "url": url,
                 "sha256": sha256,
                 "signing": "release",
+                // 证书指纹（公开信息）：站点 `/.well-known/assetlinks.json` 从这里取。
+                "certSha256": cert,
             })
         ),
     )
@@ -452,6 +504,7 @@ async fn sign_staged(state: &AppState, signing: &SigningRow) -> Result<Value, Ap
         "url": url,
         "sha256": sha256,
         "signing": "release",
+        "certSha256": cert,
     }))
 }
 
@@ -588,6 +641,43 @@ fn needs_sign(meta: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cert_sha256_normalizes_apksigner_output() {
+        // apksigner 的写法不保证大小写/分隔符；Android 要的是大写冒号分隔。
+        let spaced: Vec<String> = (0..32).map(|i| format!("{:02X}", i)).collect();
+        let upper = format!(
+            "Signer #1 certificate DN: CN=x\nSigner #1 certificate SHA-256 digest: {}\n",
+            spaced.join(":")
+        );
+        assert_eq!(cert_sha256(&upper).as_deref(), Some(spaced.join(":").as_str()));
+        // 小写 + 无分隔符 + 多余空行的输出同样能归一化。
+        let lower = format!(
+            "Verifies\nSigner #1 certificate SHA-256 digest: {}\n\nWARNING: MINSDK",
+            "abcdef0123456789".repeat(4)
+        );
+        let normalized = cert_sha256(&lower).expect("小写无分隔也应能解析");
+        assert!(normalized.starts_with("AB:CD:EF:01:23:45:67:89"), "{normalized}");
+        assert_eq!(normalized.len(), 95, "32*2 位 + 31 个冒号");
+        // 缺行 / 长度不对 → None（发布照旧，只是关联为空）。
+        assert!(cert_sha256("Verifies").is_none());
+        assert!(cert_sha256("Signer #1 certificate SHA-256 digest: abcd").is_none());
+    }
+
+    #[test]
+    fn assetlinks_empty_until_signed() {
+        // 未签名：合法空数组（不是 404 HTML，也不是 null）。
+        assert_eq!(assetlinks(None), json!([]));
+        let body = assetlinks(Some("AB:CD"));
+        assert_eq!(body[0]["target"]["namespace"], "android_app", "{body}");
+        assert_eq!(body[0]["target"]["package_name"], ANDROID_PACKAGE, "{body}");
+        assert_eq!(body[0]["target"]["sha256_cert_fingerprints"][0], "AB:CD", "{body}");
+        assert_eq!(
+            body[0]["relation"][0],
+            "delegate_permission/common.get_login_creds",
+            "{body}"
+        );
+    }
 
     #[test]
     fn unsigned_staged_triggers_sign() {
