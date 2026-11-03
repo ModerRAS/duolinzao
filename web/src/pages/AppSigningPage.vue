@@ -121,6 +121,36 @@ async function sign() {
   }
 }
 
+/// 受控分发：已发布包的下载入口只放本页（超管）。同源会话下载，
+/// 匿名打 `/app/*` 直接 401；不要在员工壳/食堂壳/登录页/页脚再加入口。
+const FALLBACK_APK = "/app/duolinzao.apk";
+
+async function publishedApkUrl(): Promise<string> {
+  try {
+    const meta = await api<{ url?: string }>("/app/version.json");
+    if (meta.url && meta.url.startsWith("/app/")) return meta.url;
+  } catch {
+    /* 未发布或会话失效时走默认路径，由服务端返回对应状态 */
+  }
+  return FALLBACK_APK;
+}
+
+function downloadApk() {
+  void publishedApkUrl().then((url) => {
+    window.location.href = url;
+  });
+}
+
+async function copyLink() {
+  try {
+    const url = new URL(await publishedApkUrl(), window.location.origin).toString();
+    await navigator.clipboard.writeText(url);
+    ElMessage.success("下载链接已复制（打开需先登录）");
+  } catch {
+    ElMessage.error("复制失败");
+  }
+}
+
 async function generate() {
   generating.value = true;
   try {
@@ -189,6 +219,18 @@ onMounted(load);
         <span>versionCode：{{ lastSign.versionCode }}（{{ lastSign.versionName }}）</span>
         <span class="mono">sha256：{{ lastSign.sha256 }}</span>
         <span v-if="lastSign.keystore_generated">本次已自动生成 keystore 并存进数据库（别名 {{ status.key_alias }}）。</span>
+      </div>
+    </div>
+    <div v-if="ready && status.release" class="card box">
+      <div class="row">
+        <div>
+          <strong>下载安装包（受控分发）</strong>
+          <p class="muted">已发布 versionCode {{ status.release.version_code }}（{{ status.release.version_name }}）。仅登录用户可下载；不要把链接贴到公开渠道，员工壳 / 登录页 / 页脚不设入口。</p>
+        </div>
+        <div class="actions">
+          <el-button type="primary" @click="downloadApk">下载 APK</el-button>
+          <el-button @click="copyLink">复制下载链接</el-button>
+        </div>
       </div>
     </div>
   </div>

@@ -56,7 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/session/logout", post(logout))
         .route("/api/session/email-otp/request", post(email_otp_request))
         .route("/api/session/email-otp/verify", post(email_otp_verify))
-        // 站点自托管 `/app/`：通用 APK 与 version.json。显式路由优先于文末的
+        // 站点自托管 `/app/`：通用 APK 与 version.json（需登录会话，匿名 401）。显式路由优先于文末的
         // SPA fallback，缺文件时返回 404 JSON（不回退 index.html，见设计 §4.4）。
         .route("/app/*path", get(serve_app_file))
         .route("/api/session/passkey/start", post(passkey_start))
@@ -215,12 +215,15 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-/// 站点自托管 `/app/`（通用 APK 与 version.json，供应用内更新同源拉取）。
+/// 站点自托管 `/app/`（通用 APK 与 version.json，供已登录用户应用内更新同源拉取）。
+/// 要求有效会话：匿名请求由 `CurrentUser` 直接 401（防直链刷流）；
+/// 首次对外发包入口只在超管「应用签名」页（同源会话下载），员工壳/登录页/页脚不放。
 /// 文件来自 `app_dir`（`[server] app_dir` 或 `DLZ_APP_DIR`，缺省 `{static_dir}/app/`）；
 /// 缺文件、未配目录或路径逃逸一律 404 JSON，绝不回退 index.html
 /// （否则 App 会把 HTML 当 version.json 解析失败）。
 async fn serve_app_file(
     State(state): State<AppState>,
+    _user: CurrentUser,
     Path(path): Path<String>,
 ) -> impl IntoResponse {
     let not_found = || {

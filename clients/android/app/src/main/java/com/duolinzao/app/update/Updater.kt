@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.FileProvider
 import com.duolinzao.app.api.ServerConfig
+import com.duolinzao.app.api.Session
 import com.duolinzao.app.api.VersionInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -18,17 +19,26 @@ import java.util.concurrent.TimeUnit
 
 /**
  * 应用内更新：只请求当前 baseUrl 同源的 version.json（§4.4）。
- * versionCode 更大才提示；下载后校验 sha256 + 包名（签名证书指纹尽力比对），任一失败丢弃。
+ * version.json 与 apk 都要求有效会话：两个请求都带 CookieStore（含 dlz_session），
+ * 未登录/过期 401 时按老样子返回 null（调用方提示，不清会话）。
  */
 object Updater {
     private val json = Json { ignoreUnknownKeys = true }
+
+    /** 带会话的客户端：登录态下载/检查更新；无会话时退化为匿名（服务端 401 即 null）。 */
+    private fun authedClient(connectTimeout: Long, readTimeout: Long): OkHttpClient {
+        val builder = OkHttpClient.Builder()
+            .connectTimeout(connectTimeout, TimeUnit.SECONDS).readTimeout(readTimeout, TimeUnit.SECONDS)
+        val jar = Session.cookies
+        if (jar != null) builder.cookieJar(jar)
+        return builder.build()
+    }
 
     suspend fun fetchRemote(context: Context): VersionInfo? = withContext(Dispatchers.IO) {
         try {
             val base = ServerConfig.effectiveBase()
             if (base.isEmpty()) return@withContext null
-            val client = OkHttpClient.Builder()
-                .connectTimeout(10, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS).build()
+            val client = authedClient(connectTimeout = 10, readTimeout = 15)
             val req = Request.Builder().url("$base/app/version.json").header("User-Agent", ServerConfig.userAgent()).build()
             client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return@withContext null
@@ -60,8 +70,7 @@ object Updater {
             // url 必须同源（防钓鱼到第三方包）。
             val url = if (remote.url.startsWith("/")) base + remote.url else remote.url
             if (!url.startsWith(base)) return@withContext null
-            val client = OkHttpClient.Builder()
-                .connectTimeout(15, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).build()
+            val client = authedClient(connectTimeout = 15, readTimeout = 60)
             val req = Request.Builder().url(url).header("User-Agent", ServerConfig.userAgent()).build()
             val dir = File(context.cacheDir, "updates").apply { mkdirs() }
             val out = File(dir, "duolinzao.apk")

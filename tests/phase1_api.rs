@@ -30,6 +30,12 @@ const PNG: &[u8] = &[
 
 const EDGE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0";
 
+/// 测试夹具路径塞进 TOML：Windows 反斜杠在 basic string 里是转义符，统一换成正斜杠
+///（Linux 下 replace 是空操作；std::fs 在 Windows 也接受 `/`）。
+fn win_path(path: &std::path::Path) -> String {
+    path.to_str().unwrap().replace('\\', "/")
+}
+
 struct Resp {
     status: StatusCode,
     bytes: Vec<u8>,
@@ -309,7 +315,7 @@ async fn prepare() -> Api {
     let image_dir = std::env::temp_dir().join("duolinzao-phase1-images");
     let _ = std::fs::remove_dir_all(&image_dir);
     std::fs::create_dir_all(&image_dir).unwrap();
-    let raw = example_config().replace("/tmp/duolinzao-images", image_dir.to_str().unwrap());
+    let raw = example_config().replace("/tmp/duolinzao-images", &win_path(&image_dir));
     let config = AppConfig::parse(&raw).unwrap();
     let mailer = Arc::new(CapturingMailer::new());
     let scripts = ScriptedBackend::failing_then_script();
@@ -2661,7 +2667,7 @@ async fn app_static_no_spa_fallback() {
     std::fs::write(app_dir.join("app/duolinzao.apk"), b"fakepk").unwrap();
     let raw_cfg = example_config().replace(
         "[server]",
-        &format!("[server]\nstatic_dir = \"{}\"", app_dir.to_str().unwrap()),
+        &format!("[server]\nstatic_dir = \"{}\"", win_path(&app_dir)),
     );
     let config = AppConfig::parse(&raw_cfg).unwrap();
     let state = AppState::new(
@@ -2676,10 +2682,12 @@ async fn app_static_no_spa_fallback() {
     .unwrap();
     let app = router(state);
 
-    async fn raw(app: axum::Router, uri: &str) -> (StatusCode, Value, Vec<(String, String)>, Vec<u8>) {
-        let request = Request::builder()
-            .method("GET")
-            .uri(uri)
+    async fn raw(app: axum::Router, uri: &str, token: Option<&str>) -> (StatusCode, Value, Vec<(String, String)>, Vec<u8>) {
+        let mut builder = Request::builder().method("GET").uri(uri);
+        if let Some(token) = token {
+            builder = builder.header("cookie", format!("dlz_session={token}"));
+        }
+        let request = builder
             .header("user-agent", "phase1-test")
             .body(Body::empty())
             .unwrap();
@@ -2707,8 +2715,31 @@ async fn app_static_no_spa_fallback() {
             .unwrap_or_default()
     };
 
+    // 未登录：version.json 与 apk 一律 401（防匿名直链刷流），连缺文件/逃逸路径也先鉴权。
+    let (status, body, _, _) = raw(app.clone(), "/app/version.json", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "匿名 version.json 应 401");
+    assert_eq!(body["error"], "unauthorized", "{body}");
+    let (status, _, _, _) = raw(app.clone(), "/app/duolinzao.apk", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "匿名 apk 应 401");
+
+    // 登录（root 超管；任意有效会话均可，下载不限超管）。
+    let super_token = must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "root", "password": "root-password-1"})),
+            Some("phase1-root"),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "super login",
+    )
+    .token();
+
     // version.json：200 + JSON 体 + JSON 类型 + 不缓存。
-    let (status, body, headers, _) = raw(app.clone(), "/app/version.json").await;
+    let (status, body, headers, _) = raw(app.clone(), "/app/version.json", Some(&super_token)).await;
     assert_eq!(status, StatusCode::OK, "version.json 应直出");
     assert_eq!(body["versionCode"], 1, "{body}");
     assert_eq!(body["url"], "/app/duolinzao.apk", "{body}");
@@ -2716,7 +2747,7 @@ async fn app_static_no_spa_fallback() {
     assert_eq!(header(&headers, "cache-control"), "no-store", "{headers:?}");
 
     // APK：200 + Android 包类型。
-    let (status, _, headers, bytes) = raw(app.clone(), "/app/duolinzao.apk").await;
+    let (status, _, headers, bytes) = raw(app.clone(), "/app/duolinzao.apk", Some(&super_token)).await;
     assert_eq!(status, StatusCode::OK, "apk 应直出");
     assert_eq!(bytes, b"fakepk", "应为夹具包内容");
     assert_eq!(
@@ -2726,7 +2757,7 @@ async fn app_static_no_spa_fallback() {
     );
 
     // 缺文件：404 JSON（error=not_found），绝不能回退 index.html。
-    let (status, body, headers, bytes) = raw(app.clone(), "/app/missing.apk").await;
+    let (status, body, headers, bytes) = raw(app.clone(), "/app/missing.apk", Some(&super_token)).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "缺文件应 404");
     assert_eq!(body["error"], "not_found", "{body}");
     assert_eq!(header(&headers, "content-type"), "application/json", "{headers:?}");
@@ -2736,7 +2767,7 @@ async fn app_static_no_spa_fallback() {
     );
 
     // 路径逃逸：同样 404。
-    let (status, _, _, _) = raw(app.clone(), "/app/../secret").await;
+    let (status, _, _, _) = raw(app.clone(), "/app/../secret", Some(&super_token)).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "逃逸应 404");
 }
 
@@ -2761,8 +2792,8 @@ async fn app_static_custom_app_dir() {
         "[server]",
         &format!(
             "[server]\nstatic_dir = \"{}\"\napp_dir = \"{}\"",
-            base.join("static").to_str().unwrap(),
-            base.join("custom").to_str().unwrap()
+            win_path(&base.join("static")),
+            win_path(&base.join("custom"))
         ),
     );
     let config = AppConfig::parse(&raw_cfg).unwrap();
@@ -2777,9 +2808,33 @@ async fn app_static_custom_app_dir() {
     )
     .unwrap();
     let app = router(state);
+    // 自定义目录同样先鉴权：匿名 401。
+    let anon = Request::builder()
+        .method("GET")
+        .uri("/app/version.json")
+        .header("user-agent", "phase1-test")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(anon).await.expect("oneshot");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "匿名应 401");
+    let super_token = must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": "root", "password": "root-password-1"})),
+            Some("phase1-appdir-root"),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "super login",
+    )
+    .token();
     let request = Request::builder()
         .method("GET")
         .uri("/app/version.json")
+        .header("cookie", format!("dlz_session={super_token}"))
         .header("user-agent", "phase1-test")
         .body(Body::empty())
         .unwrap();
@@ -2804,6 +2859,7 @@ async fn app_static_custom_app_dir() {
     let request = Request::builder()
         .method("GET")
         .uri("/app/../secret")
+        .header("cookie", format!("dlz_session={super_token}"))
         .header("user-agent", "phase1-test")
         .body(Body::empty())
         .unwrap();
@@ -2982,7 +3038,7 @@ async fn apk_boot_auto_sign_skips_without_keystore() {
     .unwrap();
     let raw_cfg = example_config().replace(
         "[server]",
-        &format!("[server]\nstatic_dir = \"{}\"", base.to_str().unwrap()),
+        &format!("[server]\nstatic_dir = \"{}\"", win_path(&base)),
     );
     let state = AppState::new(
         api.pool.clone(),
@@ -3057,7 +3113,7 @@ async fn app_signing_auto_generate_sign_and_overwrite() {
     std::fs::write(app_dir.join("app/duolinzao.apk"), b"fake-apk-bytes").unwrap();
     let raw_cfg = example_config().replace(
         "[server]",
-        &format!("[server]\nstatic_dir = \"{}\"", app_dir.to_str().unwrap()),
+        &format!("[server]\nstatic_dir = \"{}\"", win_path(&app_dir)),
     );
     let config = AppConfig::parse(&raw_cfg).unwrap();
     let state = AppState::new(

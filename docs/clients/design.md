@@ -21,8 +21,8 @@ UI 参考：[docs/ui](../ui/README.md)
 | 最低版本 | **minSdk 30（Android 11）**，理由见 §8.4 |
 | Passkey | 使用 **Android Credential Manager / 平台 API**，**不用 WebView 套 WebAuthn 页** |
 | 登录优先级 | **默认 Passkey**；无可用凭据 / 取消 / 失败后再密码（备用入口可手动切密码） |
-| 分发 | **只从各部署自己的服务器分发**：部署方改包内 Base URL 后重签，经站点 `/app/` 下发；**不用 GitHub Releases，暂不上应用商店** |
-| 应用内更新 | 第一版即包含：从自家服务器同源拉 `{baseUrl}/app/version.json`；服务端配套支持（§4.4） |
+| 分发 | **只从各部署自己的服务器分发**：部署方改包内 Base URL 后重签，经站点 `/app/` 下发（**需登录会话**，匿名 401）；首次发包入口只在超管「应用签名」页（下载 APK / 复制链接），员工壳 / 登录页 / 页脚不设入口；**不用 GitHub Releases，暂不上应用商店** |
+| 应用内更新 | 第一版即包含：登录后从自家服务器同源拉 `{baseUrl}/app/version.json`（带会话 cookie，未登录 401）；服务端配套支持（§4.4） |
 | 卓易通 | 不作为交付目标，但保持兼容：核心流程不依赖仅 GMS 才有的能力（§8.2） |
 
 ---
@@ -40,7 +40,7 @@ UI 参考：[docs/ui](../ui/README.md)
 
 - **纯血鸿蒙 / HarmonyOS NEXT / ArkTS 独立工程**（暂缓，见 §8.1）。
 - 上架 Google Play / 华为等应用商店（暂不做）。
-- 通过 GitHub Releases 分发 APK（**不用**；只从各部署自己的服务器 `/app/` 分发）。
+- 通过 GitHub Releases 分发 APK（**不用**；只从各部署自己的服务器 `/app/` 分发，**需登录**）。
 - 本期不做食堂 / 管理工作台（日后另行设计竖屏版）。
 - 在 Swarm / CD 里强制编 APK（可后续接；设计先定产物与改包流程）。
 - 另起原生专用 API；短信 OTP、支付、餐补。
@@ -300,21 +300,22 @@ APK 内例如 `assets/server.json`：
 ### 4.3 只从服务端分发
 
 - 不上架时依赖「未知来源安装」；文档说明风险。
-- 应用内更新只请求**当前 baseUrl 同源**的 `version.json`。
+- 应用内更新只请求**当前 baseUrl 同源**的 `version.json`，且**必须带登录会话**（App 更新器走 CookieStore；匿名请求服务端直接 401）。
 - **不使用 GitHub Releases** 分发 APK；暂不上应用商店。
+- 公开无鉴权直链已废弃：不要把 `/app/*.apk` 贴到公开渠道；首次发包只走超管「应用签名」页的下载 APK / 复制链接（同源会话下载）。
 
 ### 4.4 应用内更新（第一版包含）
 
 客户端：
 
-1. 启动时及「我的 → 检查更新」时请求 `GET {baseUrl}/app/version.json`（仅同源）。
+1. 启动时及「我的 → 检查更新」时请求 `GET {baseUrl}/app/version.json`（仅同源，**带登录会话**；未登录服务端返回 401）。
 2. 格式：`{ "versionCode", "versionName", "url", "sha256" }`；`url` 必须与 baseUrl 同源（一般为 `/app/duolinzao.apk`）。
 3. `versionCode` 大于本机时提示更新；下载后校验 **sha256**、**包名**与**签名证书指纹**（与当前安装包一致）均通过才调起系统安装。
 4. 任一校验失败则丢弃安装包并提示，不安装。
 
 服务端需配套的工作：
 
-1. 站点托管 `/app/` 静态目录：`/app/duolinzao.apk` 与 `/app/version.json`（可走现有静态文件服务或独立静态路由；需确保 `/app/*` 不被 SPA 回退到 `index.html`，缺失文件应返回 404）。
+1. 站点托管 `/app/` 静态目录：`/app/duolinzao.apk` 与 `/app/version.json`（可走现有静态文件服务或独立静态路由；需确保 `/app/*` 不被 SPA 回退到 `index.html`，缺失文件应返回 404；**两个文件都要求有效登录会话，匿名一律 401**）。
 2. `version.json` 由 inject / 重签步骤生成：`versionCode` / `versionName` 从通用 APK 原样读取（部署方不覆盖），并写入 `url`、`sha256`。
 3. 响应头：`version.json` 不缓存或短缓存；APK 使用正确的 `Content-Type`（`application/vnd.android.package-archive`）。
 4. 部署文档说明 `/app/` 目录的挂载 / 上传方式（具体路径、域名属部署私有信息，不入仓）。
