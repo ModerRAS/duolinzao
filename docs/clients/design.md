@@ -1,5 +1,9 @@
 # 多邻灶原生客户端设计（Android）
 
+> **2026-11-04 变更**：UI 交付方式改为**系统 WebView 壳 + PWA + 180 天长会话 + WebView 系统 Passkey**，
+> 见 [webview-shell.md](webview-shell.md)。本文的账号、权限、API、分发与签名约定仍然有效；
+> 「原生 Compose 员工端/工作台」的 UI 部分由新方案替代。
+
 状态：**已拍板**（确认前仍不写业务代码）  
 范围：与一期 Web 共用同一 Axum API；**本期只做 Android**；自托管站点分发，不上应用商店  
 权威需求：[一期需求](../requirements-phase1.md)  

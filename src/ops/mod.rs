@@ -17,7 +17,9 @@ use crate::extract::CurrentUser;
 use crate::rbac::AuthHit;
 use crate::state::AppState;
 
-pub const SESSION_DAYS: i64 = 30;
+/// 会话有效期。WebView / 浏览器要「很久不掉线」：服务端会话与 Cookie 都用这个天数
+/// （Cookie 必须带 Max-Age 才是持久 Cookie，否则进程一退就丢会话）。
+pub const SESSION_DAYS: i64 = 180;
 pub const EMAIL_OTP_MINUTES: i64 = 10;
 pub const EMAIL_OTP_STEP_SECONDS: i64 = 600;
 pub const EMAIL_OTP_RESEND_SECONDS: i64 = 60;

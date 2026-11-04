@@ -4,7 +4,7 @@
 
 技术栈：**Vue3**（前端）+ **Rust Axum**（后端）。
 
-Android 原生客户端设计见 [docs/clients/](docs/clients/README.md)；源码目录约定见 [clients/](clients/README.md)（鸿蒙暂缓；设计确认前不落业务代码）。
+Android 交付方向见 [docs/clients/webview-shell.md](docs/clients/webview-shell.md)（系统 WebView 壳 + PWA + 长会话 + 系统 Passkey；PWA/长会话已落地，壳待实现）；原原生设计见 [docs/clients/design.md](docs/clients/design.md)。源码目录约定见 [clients/](clients/README.md)。
 
 一期需求已锁定，见 [docs/requirements-phase1.md](docs/requirements-phase1.md)。
 

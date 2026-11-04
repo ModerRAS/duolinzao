@@ -33,7 +33,8 @@ object ServerConfig {
         }
     }
 
-    fun effectiveBase(): String = if (useMock) "" else (debugOverride ?: baseUrl)
+    /** debug 联调优先用本地覆盖；正式包无覆盖，回退包内 baseUrl。 */
+    fun effectiveBase(): String = debugOverride ?: if (useMock) "" else baseUrl
 
     fun valid(): Boolean = useMock || effectiveBase().startsWith("https://") || effectiveBase().startsWith("http://")
 

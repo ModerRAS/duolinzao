@@ -187,6 +187,9 @@ fn session_cookie(token: &str, secure: bool) -> Cookie<'static> {
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
+    // 持久 Cookie：浏览器 / WebView 退出进程后仍保留，配合服务端 180 天会话。
+    // 满足「很久不掉线」；吊销仍走设备/会话删除。
+    cookie.set_max_age(cookie::time::Duration::days(crate::ops::SESSION_DAYS));
     if secure {
         cookie.set_secure(true);
     }

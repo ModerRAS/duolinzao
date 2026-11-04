@@ -618,6 +618,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
+ "cookie",
  "hex",
  "http-body-util",
  "lettre",

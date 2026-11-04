@@ -17,6 +17,7 @@ axum-extra = { version = "0.9", features = ["cookie"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+cookie = "0.18"
 hex = "0.4"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls", "hostname", "pool"] }
 password-hash = "0.5"

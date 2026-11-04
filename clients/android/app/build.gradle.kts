@@ -66,6 +66,8 @@ dependencies {
     // Passkey：Credential Manager 平台 API，禁止 WebView。无 GMS/无凭据时自动回退密码。
     implementation(libs.credentials)
     implementation(libs.credentials.play.auth)
+    // WebView 套壳：系统 WebAuthn/Passkey（Credential Manager）+ WebSettingsCompat。
+    implementation(libs.webkit)
     // Compose UI 冒烟测试（mock，不连真后端，见 SmokeUiTest）。
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)
