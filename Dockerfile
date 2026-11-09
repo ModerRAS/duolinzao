@@ -1,7 +1,7 @@
 # 多邻灶一期镜像：Axum 二进制 + Vue 构建产物。数据库由部署方单独运行。
 # 餐品图片放在挂载目录，不打进镜像。许可证 AGPL-3.0。
 
-FROM node:22-bookworm-slim AS web
+FROM node:24-bookworm-slim AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
