@@ -41,7 +41,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
       TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/duolinzao_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
@@ -74,7 +74,7 @@ jobs:
     env:
       DATABASE_URL: postgres://duolinzao:duolinzao@127.0.0.1:5432/duolinzao
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
@@ -83,9 +83,9 @@ jobs:
           shared-key: e2e
       - name: 系统依赖（openssl-sys 与 Playwright 浏览器）
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: |
             web/package-lock.json
@@ -100,7 +100,7 @@ jobs:
         run: bash scripts/e2e.sh
       - name: 失败时上传浏览器报告（截图 / trace / video）
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: playwright-report
           path: |
@@ -110,7 +110,7 @@ jobs:
           retention-days: 7
       - name: 失败时上传后端日志
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-app-log
           path: |
@@ -141,7 +141,7 @@ jobs:
       DATABASE_URL: postgres://duolinzao:duolinzao@127.0.0.1:5432/duolinzao
       DLZ_SCALE: smoke
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"
@@ -150,9 +150,9 @@ jobs:
           shared-key: e2e-scale
       - name: 系统依赖（openssl-sys 与 Playwright 浏览器）
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: |
             web/package-lock.json
@@ -167,7 +167,7 @@ jobs:
         run: bash scripts/e2e.sh
       - name: 失败时上传浏览器报告（截图 / trace / video）
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: playwright-report-scale
           path: |
@@ -177,7 +177,7 @@ jobs:
           retention-days: 7
       - name: 失败时上传后端日志
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-scale-app-log
           path: |
@@ -190,15 +190,15 @@ jobs:
     name: 构建 Android APK（未签通用包，prod/staging 各一份）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # versionCode 用 git rev-list --count HEAD，必须完整历史。
           fetch-depth: 0
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
       - name: 安装 SDK 包
         run: |
           set -euo pipefail
@@ -249,7 +249,7 @@ jobs:
           fi
           ls -la app-bundle/prod app-bundle/staging
       - name: 上传产物（供 image job 打进镜像）
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: app-bundle
           path: app-bundle/
@@ -263,30 +263,30 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # 页脚版本要跑 `git describe`，必须拿到完整历史与 tag。
           fetch-depth: 0
       - name: 取 APK 产物（CI 未签包；正式签名在服务端完成）
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: app-bundle
           path: deploy/app-bundle
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: 校验 docker compose 可解析
         run: |
           cp config.docker.example.toml config.docker.toml
           docker compose -f docker-compose.yml config -q
       - name: 登录 GHCR
         if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: 生成 tag / label
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -306,7 +306,7 @@ jobs:
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "页脚版本：${VER}（算法见 scripts/ci-version.sh，与 android-apk job 同一份）"
       - name: build（PR 只 build；master / v* 才 push）
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: ${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') }}
@@ -362,7 +362,7 @@ jobs:
       IMAGE_TAG: sha-${{ github.sha }}
       DLZ_DOMAIN: ${{ vars.DLZ_DOMAIN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: 算配置版本（config.toml sha256 前 12 位，config 改名即触发服务更新）
         run: echo "CONFIG_VERSION=$(sha256sum deploy/config.toml | cut -c1-12)" >> "$GITHUB_ENV"
       - name: 准备 SSH（key + known_hosts，强制校验主机密钥）
@@ -514,7 +514,7 @@ jobs:
       IMAGE_TAG: sha-${{ github.sha }}
       DLZ_DOMAIN: ${{ vars.STAGING_DLZ_DOMAIN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: 检查 staging 配置（缺则跳过，不染红 master）
         id: guard
         env:
