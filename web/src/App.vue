@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { Bell } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { api, explain, personName } from "./api";
@@ -134,29 +134,79 @@ function firstPage(): Page {
   return nav.value.find((item) => item.key !== "employee" && item.key !== "account")?.key ?? "employee";
 }
 
+// 窄屏手机壳 BACK 逐页回退：page 变化时写历史栈，popstate 按栈恢复；
+// 桌面端不写历史、行为保持不变（history.length 恒为 1）。
+type HistoryState = { page: Page; dishId: string | null; emp: boolean };
+const ALL_PAGES: readonly Page[] = [
+  "overview", "menu", "dishEdit", "optimize", "alert", "rating", "comment",
+  "change", "device", "invite", "export", "audit", "email", "appSigning",
+  "threshold", "recover", "llm", "account", "employee",
+];
+
+function currentState(): HistoryState {
+  return { page: page.value, dishId: dishId.value, emp: portraitEmployee.value };
+}
+
+function writeHistory(replace: boolean) {
+  if (typeof window === "undefined" || !isNarrow.value) return;
+  const next = currentState();
+  const cur = window.history.state as Partial<HistoryState> | null;
+  if (
+    !replace && cur && cur.page === next.page &&
+    (cur.dishId ?? null) === (next.dishId ?? null) && (cur.emp ?? false) === next.emp
+  ) {
+    return;
+  }
+  try {
+    if (replace) window.history.replaceState(next, "");
+    else window.history.pushState(next, "");
+  } catch {
+    // 忽略（如受限上下文 pushState 抛错，不挡页面切换）
+  }
+}
+
+function applyHistory(state: unknown) {
+  if (!state || typeof state !== "object") return;
+  const prev = state as Partial<HistoryState>;
+  if (typeof prev.page !== "string" || !(ALL_PAGES as readonly string[]).includes(prev.page)) return;
+  // 回退中：直接恢复，不再写历史
+  portraitEmployee.value = prev.emp === true;
+  dishId.value = typeof prev.dishId === "string" ? prev.dishId : null;
+  page.value = prev.page as Page;
+}
+
+function onPopState(event: PopStateEvent) {
+  applyHistory(event.state);
+}
+
 function toEmployee() {
   portraitEmployee.value = true;
   page.value = "employee";
+  writeHistory(false);
 }
 
 function backToPortrait() {
   portraitEmployee.value = false;
   page.value = firstPage();
+  writeHistory(false);
 }
 
 function open(key: Page) {
   if (key === "dishEdit") dishId.value = null;
   page.value = key;
+  writeHistory(false);
 }
 
 function editDish(id: string | null) {
   dishId.value = id;
   page.value = "dishEdit";
+  writeHistory(false);
 }
 
 async function enter() {
   portraitEmployee.value = false;
   page.value = firstPage();
+  writeHistory(true);
   await loadNotes();
 }
 
@@ -197,8 +247,14 @@ onMounted(async () => {
   await refreshSession();
   if (auth.me && hasWorkbench.value) {
     page.value = firstPage();
+    writeHistory(true);
     await loadNotes();
   }
+  window.addEventListener("popstate", onPopState);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("popstate", onPopState);
 });
 </script>
 
@@ -266,7 +322,7 @@ onMounted(async () => {
       <p v-if="needsCanteen && canteens.length === 0" class="muted">当前没有可管理的食堂。</p>
       <OverviewPage v-if="page === 'overview'" />
       <MenuPage v-else-if="page === 'menu'" @edit="editDish" />
-      <DishEditPage v-else-if="page === 'dishEdit'" :dish-id="dishId" @back="page = 'menu'" />
+      <DishEditPage v-else-if="page === 'dishEdit'" :dish-id="dishId" @back="open('menu')" />
       <OptimizePage v-else-if="page === 'optimize'" />
       <AlertPage v-else-if="page === 'alert'" />
       <RatingPage v-else-if="page === 'rating'" />
@@ -281,7 +337,7 @@ onMounted(async () => {
       <RecoverPage v-else-if="page === 'recover'" />
       <LlmPage v-else-if="page === 'llm'" />
       <AppSigningPage v-else-if="page === 'appSigning'" />
-      <AccountPage v-else-if="page === 'account'" @open-devices="page = 'device'" />
+      <AccountPage v-else-if="page === 'account'" @open-devices="open('device')" />
       <div v-else class="phone-wrap">
         <div class="phone"><EmployeePage /></div>
       </div>
