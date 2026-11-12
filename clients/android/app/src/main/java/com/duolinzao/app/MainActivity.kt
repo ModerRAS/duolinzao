@@ -9,6 +9,7 @@ import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.PermissionRequest
@@ -46,6 +47,7 @@ class MainActivity : ComponentActivity() {
     private var appHost: String = ""
     private var baseUrl: String = ""
     private var fileCallback: ValueCallback<Array<Uri>>? = null
+    private var lastBackPress = 0L
 
     private val filePicker =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -99,7 +101,21 @@ class MainActivity : ComponentActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    if (webView.canGoBack()) webView.goBack() else finish()
+                    // 有历史走历史；SPA 切页与地址栏同 URL、无历史时回首页；
+                    // 首页（或已在首页）再按一次退出。URL 无法区分 SPA 内页，
+                    // 故无历史一律 load home + toast，2 秒内再按则退出。
+                    if (webView.canGoBack()) {
+                        webView.goBack()
+                        return
+                    }
+                    val now = SystemClock.uptimeMillis()
+                    if (now - lastBackPress < 2000) {
+                        finish()
+                    } else {
+                        lastBackPress = now
+                        webView.loadUrl("$baseUrl/")
+                        Toast.makeText(this@MainActivity, "已回首页，再按一次退出", Toast.LENGTH_SHORT).show()
+                    }
                 }
             },
         )
