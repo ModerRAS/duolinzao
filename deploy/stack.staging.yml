@@ -170,8 +170,10 @@ services:
         - "traefik.http.routers.duolinzao-staging.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
         - "traefik.http.services.duolinzao-staging.loadbalancer.server.port=8080"
         - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}"
+    # 就绪探针走回环管理端口（127.0.0.1:8090，只挂 /readyz，查库 SELECT 1；DB 断即 503）。
+    # 8090 只在容器回环监听，不对外发布、不经 Traefik；生产 stack.yml 不动。
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8090/readyz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
