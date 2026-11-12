@@ -49,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         // 部署探针：Traefik/CI 只看连通性，不查库、不鉴权，免 CSRF（GET 豁免）。
         .route("/healthz", get(healthz))
+        // 就绪探针已迁往回环管理端口（见 admin_router），公网不再挂载，避免外部直达 DB 探针。
         // Digital Asset Links：Android/Google 匿名拉取，必须免会话且是 application/json，
         // 不能被文末的 SPA fallback 吃成 index.html（否则通行密钥判「站点与 App 无关联」）。
         .route("/.well-known/assetlinks.json", get(assetlinks))
@@ -182,6 +183,16 @@ pub fn router(state: AppState) -> Router {
     api
 }
 
+/// 管理回环路由：只挂 `/readyz`，由 `main` 绑在 `server.admin_bind`（缺省 127.0.0.1:8090）。
+/// 边界靠只绑回环实现：外部到不了，故不判 IP、不加 token——
+/// XFF 首段可伪造（判了等于没判），token 则多一套密钥分发与轮换（已和用户对齐不要）。
+/// 公网 router 绝不挂载此路由。
+pub fn admin_router(state: AppState) -> Router {
+    Router::new()
+        .route("/readyz", get(readyz))
+        .with_state(state)
+}
+
 fn session_cookie(token: &str, secure: bool) -> Cookie<'static> {
     let mut cookie = Cookie::new("dlz_session", token.to_string());
     cookie.set_http_only(true);
@@ -219,6 +230,23 @@ async fn health() -> Json<Value> {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// 就绪探针：`GET /readyz`（仅挂管理回环 `admin_router`，公网无此路由），
+/// `SELECT 1` 走 pool：正常 200 `{status:ok}`，DB 错 503 `{error:db_unavailable}`（仅此端点用新码，其它接口错误契约不动）。
+/// 不鉴权、不判 IP、不加 token：回环绑定即边界。
+async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query("SELECT 1").fetch_one(&state.pool).await {
+        Ok(_) => (StatusCode::OK, Json(json!({"status": "ok"}))).into_response(),
+        Err(err) => {
+            tracing::error!(error = %err, "readyz database");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "db_unavailable", "message": "数据库不可用"})),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// `/.well-known/assetlinks.json`：指纹取「签名发布」写进 `version.json` 的 release
@@ -1510,9 +1538,19 @@ mod tests {
 
     /// 无 DB 的路由测试：AppState 只解析配置（pool 用 lazy，不真连）。
     fn app_with_static(dir: &std::path::Path) -> Router {
+        build_app(dir, router)
+    }
+
+    fn admin_app_with_static(dir: &std::path::Path) -> Router {
+        build_app(dir, admin_router)
+    }
+
+    fn build_app(dir: &std::path::Path, build: fn(AppState) -> Router) -> Router {
+        // Windows Temp 路径含反斜杠，TOML 基本串会转义失败，统一换成正斜杠（Windows 亦可识别）。
+        let dir_str = dir.to_str().unwrap().replace('\\', "/");
         let cfg = example_config().replace(
             "[server]",
-            &format!("[server]\nstatic_dir = \"{}\"", dir.to_str().unwrap()),
+            &format!("[server]\nstatic_dir = \"{dir_str}\""),
         );
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://duolinzao:duolinzao@127.0.0.1:1/none")
@@ -1525,7 +1563,7 @@ mod tests {
             Arc::new(ScriptedBackend::failing_then_script()),
         )
         .expect("state");
-        router(state)
+        build(state)
     }
 
     async fn get(app: Router, uri: &str) -> (StatusCode, String, Vec<u8>) {
@@ -1583,6 +1621,76 @@ mod tests {
             body[0]["target"]["sha256_cert_fingerprints"][0], "AB:CD:EF",
             "{body}"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `/readyz` DB 坏回 503：lazy pool 指向不可达地址，无需真库，必 503 + db_unavailable。
+    #[tokio::test]
+    async fn readyz_db_unavailable_returns_503() {
+        let base = std::env::temp_dir().join(format!("dlz-readyz-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let app = admin_app_with_static(&base);
+        let (status, content_type, bytes) = get(app, "/readyz").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "DB 坏应 503");
+        assert_eq!(content_type, "application/json");
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "db_unavailable", "{body}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `/readyz` 健康库回 200：有真库才断言，无库则跳过（保证无 DB 环境下 cargo test 仍绿）。
+    #[tokio::test]
+    async fn readyz_ok_returns_200_when_db_healthy() {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://duolinzao:duolinzao@127.0.0.1:5432/duolinzao".to_string());
+        let pool = match PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect(&url)
+            .await
+        {
+            Ok(p) => p,
+            Err(err) => {
+                eprintln!("skip readyz_ok: 无可用库 ({err})");
+                return;
+            }
+        };
+        if sqlx::query("SELECT 1").fetch_one(&pool).await.is_err() {
+            eprintln!("skip readyz_ok: SELECT 1 失败");
+            return;
+        }
+        let cfg = example_config();
+        let state = AppState::new(
+            pool,
+            AppConfig::parse(&cfg).expect("config"),
+            Arc::new(ManualClock::new(chrono::Utc::now())),
+            Arc::new(CapturingMailer::default()),
+            Arc::new(ScriptedBackend::failing_then_script()),
+        )
+        .expect("state");
+        let app = admin_router(state);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/readyz")
+            .header("user-agent", "phase1-test")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "ok", "{body}");
+    }
+
+    /// 公网路由不再挂载 `/readyz`：公网打过去落到静态回退（404），管理端口才 200/503。
+    #[tokio::test]
+    async fn readyz_not_on_public_router() {
+        let base = std::env::temp_dir().join(format!("dlz-readyz-pub-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let app = app_with_static(&base);
+        let (status, _, _) = get(app, "/readyz").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "公网 /readyz 应 404");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

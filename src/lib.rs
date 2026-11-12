@@ -11,5 +11,5 @@ pub mod state;
 pub mod version;
 
 pub use config::AppConfig;
-pub use routes::router;
+pub use routes::{router, admin_router};
 pub use state::AppState;
