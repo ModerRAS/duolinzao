@@ -576,6 +576,17 @@ pub async fn selection_slot(
     }))
 }
 
+/// 选菜写锁键：同食堂同餐同键（串行），不同餐大概率不同键（互不阻塞；哈希碰撞只会多串行，不影响正确性）。
+fn selection_lock_key(canteen_id: Uuid, date: NaiveDate, slot: &str) -> i64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    canteen_id.hash(&mut hasher);
+    date.hash(&mut hasher);
+    slot.hash(&mut hasher);
+    hasher.finish() as i64
+}
+
 pub async fn put_selection(
     state: &AppState,
     user: &CurrentUser,
@@ -602,6 +613,12 @@ pub async fn put_selection(
         }
     }
     let mut tx = state.pool.begin().await?;
+    // 串行同食堂同餐的并发写：全量 DELETE+INSERT 替换必须互斥，否则写写交错变 500 或丢更新。
+    // 锁粒度按 (canteen, date, slot) 取键；xact 级锁随事务结束自动释放；last-writer-wins 确定性收敛。
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(selection_lock_key(canteen_id, date, slot))
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM menu_pick WHERE canteen_id = $1 AND meal_date = $2 AND slot = $3")
         .bind(canteen_id)
         .bind(date)
@@ -1316,4 +1333,29 @@ fn _hit(hit: AuthHit) -> AuthHit {
 #[allow(dead_code)]
 fn _today(state: &AppState) -> NaiveDate {
     shanghai_date(state.clock.now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_lock_key_is_stable_per_meal() {
+        let canteen = Uuid::new_v4();
+        let date = NaiveDate::from_ymd_opt(2026, 11, 13).unwrap();
+        // 同餐同键：并发写串行化到同一把锁上。
+        assert_eq!(
+            selection_lock_key(canteen, date, "lunch"),
+            selection_lock_key(canteen, date, "lunch")
+        );
+        // 不同餐不同键（大概率）：互不阻塞。
+        assert_ne!(
+            selection_lock_key(canteen, date, "lunch"),
+            selection_lock_key(canteen, date, "dinner")
+        );
+        assert_ne!(
+            selection_lock_key(canteen, date, "lunch"),
+            selection_lock_key(Uuid::new_v4(), date, "lunch")
+        );
+    }
 }

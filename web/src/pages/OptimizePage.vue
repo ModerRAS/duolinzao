@@ -109,17 +109,45 @@ async function save(nextGroups: Groups<Candidate>) {
     next.value = body.next;
   } catch (error) {
     ElMessage.error(explain(error));
+    // 失败回读服务端态：写可能已生效（如响应超时），以服务端为准重建本地态。
+    try {
+      await loadPick();
+    } catch {
+      /* 已提示过，保持本地旧态 */
+    }
   }
 }
 
+// 同餐 save 串行化：在途锁按餐键排队，toggle 永远基于最新本地态计算，
+// 避免快速连点形成基于过期快照的并发全量 PUT。
+const saveChains = new Map<string, Promise<void>>();
+
+function mealKey() {
+  return `${auth.canteenId}/${date.value}/${slot.value}`;
+}
+
 function toggle(kind: Kind, index: number) {
-  const copy: Groups<Candidate> = {
-    菜: groups.value.菜.map((item) => ({ ...item })),
-    饭: groups.value.饭.map((item) => ({ ...item })),
-    汤: groups.value.汤.map((item) => ({ ...item })),
-  };
-  copy[kind][index].selected = !copy[kind][index].selected;
-  save(copy);
+  const key = mealKey();
+  const prev = saveChains.get(key) ?? Promise.resolve();
+  const cur: Promise<void> = prev.catch(() => {}).then(async () => {
+    const copy: Groups<Candidate> = {
+      菜: groups.value.菜.map((item) => ({ ...item })),
+      饭: groups.value.饭.map((item) => ({ ...item })),
+      汤: groups.value.汤.map((item) => ({ ...item })),
+    };
+    copy[kind][index].selected = !copy[kind][index].selected;
+    await save(copy);
+  });
+  // 摘掉已完成的队尾，避免 Map 无限增长；后到的 toggle 已挂在 cur 之后，不受影响。
+  void cur.then(
+    () => {
+      if (saveChains.get(key) === cur) saveChains.delete(key);
+    },
+    () => {
+      if (saveChains.get(key) === cur) saveChains.delete(key);
+    },
+  );
+  saveChains.set(key, cur);
 }
 
 function openSlot(day: string, item: Slot) {
