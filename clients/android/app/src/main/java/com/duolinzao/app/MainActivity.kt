@@ -197,6 +197,9 @@ class MainActivity : ComponentActivity() {
                 error: WebResourceError,
             ) {
                 if (!request.isForMainFrame) return
+                // 主框架加载失败：这次「重试」没有成功，取消待清理标记
+                // （错误页会重新显示，等下一次重试成功再清历史）。
+                clearHistoryAfterNav = false
                 showOfflinePage()
             }
 
