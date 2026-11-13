@@ -47,7 +47,9 @@ class MainActivity : ComponentActivity() {
     private var appHost: String = ""
     private var baseUrl: String = ""
     private var fileCallback: ValueCallback<Array<Uri>>? = null
-    private var lastBackPress = 0L
+    // null = 未处于「已回首页、再按一次退出」状态；不能用 0L：
+    // 开机 2 秒内 uptimeMillis() 还很小，会被误判成双击直接退出。
+    private var lastBackPress: Long? = null
 
     private val filePicker =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -101,20 +103,28 @@ class MainActivity : ComponentActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    // 有历史走历史；SPA 切页与地址栏同 URL、无历史时回首页；
-                    // 首页（或已在首页）再按一次退出。URL 无法区分 SPA 内页，
-                    // 故无历史一律 load home + toast，2 秒内再按则退出。
-                    if (webView.canGoBack()) {
-                        webView.goBack()
-                        return
-                    }
+                    // BACK 状态机（判定逻辑抽在 BackPolicy，JVM 单测覆盖）：
+                    // 1. 2 秒窗口内再按 = 退出。必须先于 canGoBack 判断：loadUrl
+                    //    在重定向 / SSL error 等情况下可能新增历史条目，先看 canGoBack
+                    //    会让第二次按 BACK 走 goBack，双击退出失效；
+                    // 2. 有历史走历史（goBack 属于导航，重置待退出状态，避免跨页误退）；
+                    // 3. 无历史：SPA 切页与地址栏同 URL，URL 无法区分内页，
+                    //    一律 load home + toast，并记下待退出时间。
                     val now = SystemClock.uptimeMillis()
-                    if (now - lastBackPress < 2000) {
-                        finish()
-                    } else {
-                        lastBackPress = now
-                        webView.loadUrl("$baseUrl/")
-                        Toast.makeText(this@MainActivity, "已回首页，再按一次退出", Toast.LENGTH_SHORT).show()
+                    when (BackPolicy.decide(now, webView.canGoBack(), lastBackPress)) {
+                        BackAction.FINISH -> {
+                            lastBackPress = null
+                            finish()
+                        }
+                        BackAction.GO_BACK -> {
+                            lastBackPress = null
+                            webView.goBack()
+                        }
+                        BackAction.ARM_HOME -> {
+                            lastBackPress = now
+                            webView.loadUrl("$baseUrl/")
+                            Toast.makeText(this@MainActivity, "已回首页，再按一次退出", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             },
@@ -248,6 +258,10 @@ class MainActivity : ComponentActivity() {
             </div></body></html>
         """.trimIndent()
         webView.loadDataWithBaseURL(baseUrl, html, "text/html", "utf-8", null)
+        // 错误页不该成为可回退的历史条目：否则 BACK 会退回加载失败的 URL、
+        // 甚至反复触发错误页，而不是按「回首页 / 双击退出」处理。
+        // 页面里保留「重试」链接作为唯一入口，清历史不影响重试。
+        webView.clearHistory()
     }
 
     private fun openExternal(uri: Uri) {
