@@ -68,6 +68,8 @@ dependencies {
     implementation(libs.credentials.play.auth)
     // WebView 套壳：系统 WebAuthn/Passkey（Credential Manager）+ WebSettingsCompat。
     implementation(libs.webkit)
+    // 壳 BACK 状态机等纯 Kotlin 逻辑的 JVM 单测（app/src/test，不依赖 Android 运行时）。
+    testImplementation(libs.junit.jvm)
     // Compose UI 冒烟测试（mock，不连真后端，见 SmokeUiTest）。
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)

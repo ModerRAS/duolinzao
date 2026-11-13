@@ -4,6 +4,7 @@ kotlin = "2.0.0"
 serialization = "1.7.3"
 coroutines = "1.7.3"
 testExt = "1.2.1"
+junitJvm = "4.13.2"
 espresso = "3.6.1"
 composeBom = "2024.04.01"
 navigation = "2.7.7"
@@ -31,6 +32,7 @@ webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
 compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
 compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
 test-junit = { group = "androidx.test.ext", name = "junit", version.ref = "testExt" }
+junit-jvm = { group = "junit", name = "junit", version.ref = "junitJvm" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
 
 [plugins]
