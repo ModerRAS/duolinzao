@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -232,21 +234,39 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+/// 就绪探针 DB 短超时：readiness 必须快失败。不加 timeout 时 DB 断掉会被 pool 的
+/// acquire_timeout 拖住（默认 30s，CI 单测实测约 30s 才返回 503），Swarm 健康检查
+/// 与排障都拿不到及时信号；2s 足够本地/同机网络，超时按 db_unavailable 处理。
+const READYZ_DB_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// 就绪探针：`GET /readyz`（仅挂管理回环 `admin_router`，公网无此路由），
-/// `SELECT 1` 走 pool：正常 200 `{status:ok}`，DB 错 503 `{error:db_unavailable}`（仅此端点用新码，其它接口错误契约不动）。
+/// `SELECT 1` 走 pool：正常 200 `{status:ok}`，DB 错/超时 503 `{error:db_unavailable}`（仅此端点用新码，其它接口错误契约不动）。
 /// 不鉴权、不判 IP、不加 token：回环绑定即边界。
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    match sqlx::query("SELECT 1").fetch_one(&state.pool).await {
-        Ok(_) => (StatusCode::OK, Json(json!({"status": "ok"}))).into_response(),
-        Err(err) => {
+    let probe = sqlx::query("SELECT 1").fetch_one(&state.pool);
+    match tokio::time::timeout(READYZ_DB_TIMEOUT, probe).await {
+        Ok(Ok(_)) => (StatusCode::OK, Json(json!({"status": "ok"}))).into_response(),
+        Ok(Err(err)) => {
             tracing::error!(error = %err, "readyz database");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "db_unavailable", "message": "数据库不可用"})),
-            )
-                .into_response()
+            db_unavailable()
+        }
+        Err(_) => {
+            tracing::error!(
+                timeout_ms = READYZ_DB_TIMEOUT.as_millis() as u64,
+                "readyz database timeout"
+            );
+            db_unavailable()
         }
     }
+}
+
+/// DB 不可用的统一响应：错误契约固定为 `db_unavailable`（时间超时与连接失败同码）。
+fn db_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": "db_unavailable", "message": "数据库不可用"})),
+    )
+        .into_response()
 }
 
 /// `/.well-known/assetlinks.json`：指纹取「签名发布」写进 `version.json` 的 release
@@ -1625,25 +1645,54 @@ mod tests {
     }
 
     /// `/readyz` DB 坏回 503：lazy pool 指向不可达地址，无需真库，必 503 + db_unavailable。
+    /// 同时守住短超时：没有 2s 短路时这里会被 pool 的 acquire_timeout 拖住
+    /// （默认 30s，CI 实测约 30s），readiness 就失去快失败的意义。
     #[tokio::test]
     async fn readyz_db_unavailable_returns_503() {
         let base = std::env::temp_dir().join(format!("dlz-readyz-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
         let app = admin_app_with_static(&base);
+        let started = std::time::Instant::now();
         let (status, content_type, bytes) = get(app, "/readyz").await;
+        let elapsed = started.elapsed();
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "DB 坏应 503");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "DB 断必须按 2s 短超时快失败，实际等了 {elapsed:?}"
+        );
         assert_eq!(content_type, "application/json");
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"], "db_unavailable", "{body}");
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// `/readyz` 健康库回 200：有真库才断言，无库则跳过（保证无 DB 环境下 cargo test 仍绿）。
+    /// 无真库时本地跳过；CI 不允许跳过——test job 的 DATABASE_URL 一定可用，
+    /// 这里再 skip 就说明正路径又没被测到（旧版 CI 静默 skip 的教训），必须红。
+    fn absent_db(reason: impl std::fmt::Display) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI 环境 readyz 正路径不能 skip（{reason}）"
+        );
+        eprintln!("skip readyz_ok: {reason}");
+    }
+
+    /// `/readyz` 健康库回 200：有真库就真断言，本地无库才 skip。
+    ///
+    /// 连接串优先级 **DATABASE_URL → TEST_DATABASE_URL → 本机默认**：CI test job 里
+    /// DATABASE_URL 指向 postgres 维护库（service 容器保证存在），而 TEST_DATABASE_URL
+    /// 的 duolinzao_test 由集成测试创建——lib 单测先跑时它还不存在，旧优先级会让 200
+    /// 正路径在 CI 静默 skip、等于没测。顺序改过来后 CI 每次都会真走到 200 断言。
     #[tokio::test]
     async fn readyz_ok_returns_200_when_db_healthy() {
-        let url = std::env::var("TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://duolinzao:duolinzao@127.0.0.1:5432/duolinzao".to_string());
+        let (url, source) = std::env::var("DATABASE_URL")
+            .map(|url| (url, "DATABASE_URL"))
+            .or_else(|_| std::env::var("TEST_DATABASE_URL").map(|url| (url, "TEST_DATABASE_URL")))
+            .unwrap_or_else(|_| {
+                (
+                    "postgres://duolinzao:duolinzao@127.0.0.1:5432/duolinzao".to_string(),
+                    "默认连接串",
+                )
+            });
         let pool = match PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(2))
@@ -1652,12 +1701,12 @@ mod tests {
         {
             Ok(p) => p,
             Err(err) => {
-                eprintln!("skip readyz_ok: 无可用库 ({err})");
+                absent_db(format_args!("{source} 连不上: {err}"));
                 return;
             }
         };
-        if sqlx::query("SELECT 1").fetch_one(&pool).await.is_err() {
-            eprintln!("skip readyz_ok: SELECT 1 失败");
+        if let Err(err) = sqlx::query("SELECT 1").fetch_one(&pool).await {
+            absent_db(format_args!("{source} 上 SELECT 1 失败: {err}"));
             return;
         }
         let cfg = example_config();
@@ -1683,14 +1732,32 @@ mod tests {
         assert_eq!(body["status"], "ok", "{body}");
     }
 
-    /// 公网路由不再挂载 `/readyz`：公网打过去落到静态回退（404），管理端口才 200/503。
+    /// 公网路由不挂 `/readyz`；真实部署有 `static_dir/index.html`，所以公网 GET /readyz
+    /// 会被 SPA fallback 吃掉：返回 **index.html 的 body + text/html**，不是 readyz JSON。
+    /// 注意状态码是 404 而不是 200——tower-http 的 `ServeDir::not_found_service` 会把
+    /// fallback 响应的 status 固定改成 404（文件不存在仍是 404 语义），但 body 是首页。
+    /// 结论不变：公网那个响应跟就绪无关；真正的探针只在 `admin_bind`（缺省 127.0.0.1:8090）。
     #[tokio::test]
     async fn readyz_not_on_public_router() {
         let base = std::env::temp_dir().join(format!("dlz-readyz-pub-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("index.html"), "<html>spa</html>").unwrap();
         let app = app_with_static(&base);
-        let (status, _, _) = get(app, "/readyz").await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "公网 /readyz 应 404");
+        let (status, content_type, bytes) = get(app, "/readyz").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "公网 /readyz 没有路由，落 SPA fallback（not_found_service 固定 404）"
+        );
+        assert!(
+            content_type.starts_with("text/html"),
+            "必须是 SPA 首页而非 readyz JSON，实际 Content-Type={content_type}"
+        );
+        assert_eq!(
+            bytes,
+            b"<html>spa</html>".to_vec(),
+            "必须是 index.html 原文（公网看不到 readyz JSON，也拿不到 DB 就绪信息）"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }
