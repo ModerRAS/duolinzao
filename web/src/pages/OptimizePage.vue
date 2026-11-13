@@ -29,6 +29,11 @@ interface WeekDay {
   date: string;
   slots: Record<Slot, WeekCell>;
 }
+interface MealRef {
+  canteenId: string;
+  date: string;
+  slot: Slot;
+}
 
 const mode = ref<"week" | "pick">("week");
 const anchor = ref("");
@@ -38,6 +43,10 @@ const groups = ref<Groups<Candidate>>({ 菜: [], 饭: [], 汤: [] });
 const headcount = ref(0);
 const next = ref<{ date: string; slot: Slot } | null>(null);
 const weekDays = ref<WeekDay[]>([]);
+// 每餐最近已知 groups（key = canteen/date/slot）：切走后排队 save 用它做基数，保证连续点击组合正确。
+const groupsByMeal = new Map<string, Groups<Candidate>>();
+// groups.value 当前对应的餐次：切视图后、新数据回来前，避免把上一餐的数据当成本餐基数。
+const groupsRef = ref<MealRef | null>(null);
 
 const days = computed(() =>
   Array.from({ length: 7 }, (_, index) => {
@@ -52,11 +61,53 @@ function emptyCell(): WeekCell {
   return { expected_headcount: 0, groups: { 菜: [], 饭: [], 汤: [] } };
 }
 
+function mealKey(ref: MealRef) {
+  return `${ref.canteenId}/${ref.date}/${ref.slot}`;
+}
+
+function currentMealRef(): MealRef | null {
+  if (!auth.canteenId) return null;
+  return { canteenId: auth.canteenId, date: date.value, slot: slot.value };
+}
+
+function sameMeal(ref: MealRef, other: MealRef | null) {
+  return !!other && ref.canteenId === other.canteenId && ref.date === other.date && ref.slot === other.slot;
+}
+
+function inPickView(ref: MealRef) {
+  return mode.value === "pick" && sameMeal(ref, currentMealRef());
+}
+
+// 晚到响应/并发写序号：只在最新一次请求、且期间该餐没有新 save 落库时才回填界面。
+let weekLoadSeq = 0;
+let pickLoadSeq = 0;
+const saveEpochs = new Map<string, number>();
+
+function saveEpoch(key: string) {
+  return saveEpochs.get(key) ?? 0;
+}
+
+function markSaved(key: string) {
+  saveEpochs.set(key, saveEpoch(key) + 1);
+}
+
 async function loadWeek() {
-  if (!auth.canteenId) return;
+  const canteenId = auth.canteenId;
+  if (!canteenId) return;
+  const requestedDate = date.value;
+  const seq = ++weekLoadSeq;
   const body = await api<{ week_start: string; days: WeekDay[] }>(
-    `/api/canteens/${auth.canteenId}/selection/week?date=${date.value}`,
+    `/api/canteens/${canteenId}/selection/week?date=${requestedDate}`,
   );
+  // 晚到响应丢弃：期间切了食堂/周次或已进入当餐视图，不能覆盖当前界面。
+  if (
+    seq !== weekLoadSeq ||
+    auth.canteenId !== canteenId ||
+    date.value !== requestedDate ||
+    mode.value !== "week"
+  ) {
+    return;
+  }
   anchor.value = body.week_start;
   weekDays.value = body.days.map((day) => ({
     date: day.date,
@@ -66,22 +117,41 @@ async function loadWeek() {
       dinner: day.slots?.dinner ?? emptyCell(),
     },
   }));
+  // 周视图顺带刷新每餐缓存：之后从周视图点进某餐、或切走后排队 save，都有该餐基数可用。
+  for (const day of weekDays.value) {
+    for (const item of SLOTS) {
+      groupsByMeal.set(
+        mealKey({ canteenId, date: day.date, slot: item }),
+        day.slots[item].groups,
+      );
+    }
+  }
 }
 
 async function loadPick() {
-  if (!auth.canteenId) return;
+  const ref = currentMealRef();
+  if (!ref) return;
+  const key = mealKey(ref);
+  // 请求发出时的写序号：晚于它的 save 一旦落库，本次读到的就是旧快照，回填会把刚勾的选择滚掉。
+  const epoch = saveEpoch(key);
+  const seq = ++pickLoadSeq;
   const week = await api<{ week_start: string }>(
-    `/api/canteens/${auth.canteenId}/selection/week?date=${date.value}`,
+    `/api/canteens/${ref.canteenId}/selection/week?date=${ref.date}`,
   );
+  // 晚到响应丢弃：视图已变（切餐/日期/食堂或回周视图）时不能覆盖当前界面。
+  if (seq !== pickLoadSeq || !inPickView(ref)) return;
   anchor.value = week.week_start;
   const body = await api<{
     expected_headcount: number;
     groups: Groups<Candidate>;
     next: { date: string; slot: Slot };
-  }>(`/api/canteens/${auth.canteenId}/selection?date=${date.value}&slot=${slot.value}`);
+  }>(`/api/canteens/${ref.canteenId}/selection?date=${ref.date}&slot=${ref.slot}`);
+  if (seq !== pickLoadSeq || !inPickView(ref) || saveEpoch(key) !== epoch) return;
   groups.value = body.groups;
+  groupsRef.value = ref;
   headcount.value = body.expected_headcount;
   next.value = body.next;
+  groupsByMeal.set(key, body.groups);
 }
 
 async function load() {
@@ -93,50 +163,66 @@ async function load() {
   }
 }
 
-async function save(nextGroups: Groups<Candidate>) {
+async function save(ref: MealRef, nextGroups: Groups<Candidate>) {
+  const key = mealKey(ref);
   const ids = KINDS.flatMap((kind) => nextGroups[kind].filter((item) => item.selected).map((item) => item.dish_id));
   try {
     const body = await api<{
       expected_headcount: number;
       groups: Groups<Candidate>;
       next: { date: string; slot: Slot };
-    }>(`/api/canteens/${auth.canteenId}/selection/${date.value}/${slot.value}`, {
+    }>(`/api/canteens/${ref.canteenId}/selection/${ref.date}/${ref.slot}`, {
       method: "PUT",
       body: JSON.stringify({ dish_ids: ids }),
     });
-    groups.value = body.groups;
-    headcount.value = body.expected_headcount;
-    next.value = body.next;
+    // 响应按快照餐次归位：只有它仍是当前视图才更新界面，绝不把 A 餐的响应贴到 B 餐。
+    groupsByMeal.set(key, body.groups);
+    markSaved(key);
+    if (inPickView(ref)) {
+      groups.value = body.groups;
+      groupsRef.value = ref;
+      headcount.value = body.expected_headcount;
+      next.value = body.next;
+    }
   } catch (error) {
-    ElMessage.error(explain(error));
-    // 失败回读服务端态：写可能已生效（如响应超时），以服务端为准重建本地态。
-    try {
-      await loadPick();
-    } catch {
-      /* 已提示过，保持本地旧态 */
+    if (inPickView(ref)) {
+      ElMessage.error(explain(error));
+      // 失败回读服务端态：写可能已生效（如响应超时），以服务端为准重建本地态。
+      try {
+        await loadPick();
+      } catch {
+        /* 已提示过，保持本地旧态 */
+      }
+    } else {
+      // 已切走：不把该餐的提示/回读贴到别的餐上；丢弃本地缓存，后续排队 save 以服务端为准。
+      groupsByMeal.delete(key);
     }
   }
 }
 
-// 同餐 save 串行化：在途锁按餐键排队，toggle 永远基于最新本地态计算，
-// 避免快速连点形成基于过期快照的并发全量 PUT。
+// 同餐 save 串行化：队列键与请求 URL 都用点击时的餐次快照，避免排队期间切餐写错目标。
 const saveChains = new Map<string, Promise<void>>();
 
-function mealKey() {
-  return `${auth.canteenId}/${date.value}/${slot.value}`;
-}
-
-function toggle(kind: Kind, index: number) {
-  const key = mealKey();
+function toggle(kind: Kind, dishId: string) {
+  const ref = currentMealRef();
+  if (!ref) return;
+  const key = mealKey(ref);
   const prev = saveChains.get(key) ?? Promise.resolve();
   const cur: Promise<void> = prev.catch(() => {}).then(async () => {
+    // 执行时取该餐最新已知态：当前视图且数据确属该餐 → groups.value（含前一次 save 结果）；
+    // 否则 → 该餐缓存，保证连续点击组合正确；都取不到就跳过，绝不拿别的餐当基数。
+    const base = inPickView(ref) && sameMeal(ref, groupsRef.value) ? groups.value : groupsByMeal.get(key);
+    if (!base) return;
     const copy: Groups<Candidate> = {
-      菜: groups.value.菜.map((item) => ({ ...item })),
-      饭: groups.value.饭.map((item) => ({ ...item })),
-      汤: groups.value.汤.map((item) => ({ ...item })),
+      菜: base.菜.map((item) => ({ ...item })),
+      饭: base.饭.map((item) => ({ ...item })),
+      汤: base.汤.map((item) => ({ ...item })),
     };
-    copy[kind][index].selected = !copy[kind][index].selected;
-    await save(copy);
+    const dish = copy[kind].find((item) => item.dish_id === dishId);
+    // 找不到就跳过：服务端重排/下架后不按 index 猜，避免勾错菜。
+    if (!dish) return;
+    dish.selected = !dish.selected;
+    await save(ref, copy);
   });
   // 摘掉已完成的队尾，避免 Map 无限增长；后到的 toggle 已挂在 cur 之后，不受影响。
   void cur.then(
@@ -248,12 +334,12 @@ watch(() => [auth.canteenId, date.value, slot.value, mode.value], load, { immedi
           <section v-for="kind in KINDS" :key="kind" class="col">
             <h3>{{ kind }}</h3>
             <div
-              v-for="(item, index) in groups[kind]"
+              v-for="item in groups[kind]"
               :key="item.dish_id"
               class="dish-card"
               :class="{ selected: item.selected }"
               :style="{ borderColor: toneColor(item.tone) }"
-              @click="toggle(kind, index)"
+              @click="toggle(kind, item.dish_id)"
             >
               <Thumb :src="item.image_url" round />
               <div class="meta">
@@ -262,7 +348,7 @@ watch(() => [auth.canteenId, date.value, slot.value, mode.value], load, { immedi
                   <el-tag v-for="tag in item.taste_tags" :key="tag" size="small" effect="plain" round>{{ tag }}</el-tag>
                 </div>
               </div>
-              <el-checkbox :model-value="item.selected" @click.stop @change="toggle(kind, index)" />
+              <el-checkbox :model-value="item.selected" @click.stop @change="toggle(kind, item.dish_id)" />
             </div>
             <p v-if="groups[kind].length === 0" class="muted">这一组没有启用的餐品</p>
           </section>
