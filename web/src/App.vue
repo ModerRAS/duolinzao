@@ -28,26 +28,31 @@ import ThresholdPage from "./pages/ThresholdPage.vue";
 import { auth, can, managedCanteens, refreshSession } from "./session";
 import { loadVersion, versionFooter } from "./version";
 
-type Page =
-  | "overview"
-  | "menu"
-  | "dishEdit"
-  | "optimize"
-  | "alert"
-  | "rating"
-  | "comment"
-  | "change"
-  | "device"
-  | "invite"
-  | "export"
-  | "audit"
-  | "email"
-  | "appSigning"
-  | "threshold"
-  | "recover"
-  | "llm"
-  | "account"
-  | "employee";
+// 页面清单是唯一事实源：type Page 由 ALL_PAGES 推导，避免手工维护两份。
+const ALL_PAGES = [
+  "overview",
+  "menu",
+  "dishEdit",
+  "optimize",
+  "alert",
+  "rating",
+  "comment",
+  "change",
+  "device",
+  "invite",
+  "export",
+  "audit",
+  "email",
+  "appSigning",
+  "threshold",
+  "recover",
+  "llm",
+  "account",
+  "employee",
+] as const;
+type Page = (typeof ALL_PAGES)[number];
+// popstate 的 state 来自历史条目，先按 string 查表再收窄为 Page。
+const PAGE_SET: ReadonlySet<string> = new Set(ALL_PAGES);
 
 interface Note {
   id: string;
@@ -134,14 +139,10 @@ function firstPage(): Page {
   return nav.value.find((item) => item.key !== "employee" && item.key !== "account")?.key ?? "employee";
 }
 
-// 窄屏手机壳 BACK 逐页回退：page 变化时写历史栈，popstate 按栈恢复；
-// 桌面端不写历史、行为保持不变（history.length 恒为 1）。
+// 窄屏手机壳 BACK 逐页回退：页面切换时写历史栈，popstate 按栈恢复。
+// 只有窄屏（手机浏览器 / Android WebView 壳）维护历史；桌面端不写历史、
+// 不新增历史条目，浏览器前进/后退仍按整页导航处理，行为与改动前一致。
 type HistoryState = { page: Page; dishId: string | null; emp: boolean };
-const ALL_PAGES: readonly Page[] = [
-  "overview", "menu", "dishEdit", "optimize", "alert", "rating", "comment",
-  "change", "device", "invite", "export", "audit", "email", "appSigning",
-  "threshold", "recover", "llm", "account", "employee",
-];
 
 function currentState(): HistoryState {
   return { page: page.value, dishId: dishId.value, emp: portraitEmployee.value };
@@ -165,18 +166,43 @@ function writeHistory(replace: boolean) {
   }
 }
 
-function applyHistory(state: unknown) {
-  if (!state || typeof state !== "object") return;
+function parseHistoryState(state: unknown): HistoryState | null {
+  if (!state || typeof state !== "object") return null;
   const prev = state as Partial<HistoryState>;
-  if (typeof prev.page !== "string" || !(ALL_PAGES as readonly string[]).includes(prev.page)) return;
+  if (typeof prev.page !== "string" || !PAGE_SET.has(prev.page)) return null;
+  return {
+    page: prev.page as Page,
+    dishId: typeof prev.dishId === "string" ? prev.dishId : null,
+    emp: prev.emp === true,
+  };
+}
+
+// 默认工作台（与 onMounted / enter 的初始页同一来源），用于历史条目不可用时的兜底。
+function resetToWorkbench() {
+  portraitEmployee.value = false;
+  dishId.value = null;
+  page.value = firstPage();
+}
+
+function applyHistory(state: HistoryState) {
   // 回退中：直接恢复，不再写历史
-  portraitEmployee.value = prev.emp === true;
-  dishId.value = typeof prev.dishId === "string" ? prev.dishId : null;
-  page.value = prev.page as Page;
+  portraitEmployee.value = state.emp;
+  dishId.value = state.dishId;
+  page.value = state.page;
 }
 
 function onPopState(event: PopStateEvent) {
-  applyHistory(event.state);
+  // 桌面端不维护页面历史，popstate 不参与页面恢复。
+  if (!isNarrow.value) return;
+  const next = parseHistoryState(event.state);
+  if (next) {
+    applyHistory(next);
+    return;
+  }
+  // state 缺失/非法（历史条目损坏，或在壳外留下的条目）：不能静默 return，
+  // 否则 BACK 被吃掉、页面停在原处。恢复默认工作台，并把当前条目规范化为合法 state。
+  resetToWorkbench();
+  writeHistory(true);
 }
 
 function toEmployee() {
@@ -186,8 +212,15 @@ function toEmployee() {
 }
 
 function backToPortrait() {
-  portraitEmployee.value = false;
-  page.value = firstPage();
+  // 员工竖屏是 toEmployee() 推入的历史条目（emp=true）。直接 history.back() 由
+  // popstate 恢复食堂工作台；不能再 push 一条，否则 BACK 会先回到员工端。
+  const cur = window.history.state as Partial<HistoryState> | null;
+  if (isNarrow.value && cur?.emp === true) {
+    window.history.back();
+    return;
+  }
+  // 降级：state 丢失等情况下没有可回退的员工条目，按原路由直接切回工作台。
+  resetToWorkbench();
   writeHistory(false);
 }
 
