@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use chrono::{TimeZone, Utc};
+use chrono::{NaiveDate, TimeZone, Utc};
 use duolinzao::config::{example_config, AppConfig};
 use duolinzao::router;
 use duolinzao::state::{AppState, CapturingMailer, ManualClock, ScriptedBackend};
@@ -332,6 +332,84 @@ async fn prepare() -> Api {
         mailer,
         scripts,
     }
+}
+
+async fn password_login(api: &Api, username: &str, password: &str, ua: &str) -> String {
+    must(
+        api.call(
+            "POST",
+            "/api/session/password",
+            None,
+            Some(json!({"username": username, "password": password})),
+            Some(ua),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "password login",
+    )
+    .token()
+}
+
+fn sorted_ids(ids: &[Uuid]) -> Vec<Uuid> {
+    let mut out = ids.to_vec();
+    out.sort();
+    out
+}
+
+/// 建食堂 + 食堂管理员（canteen 角色）+ 菜/饭/汤各一道启用餐品，返回 (食堂 id, cook 会话, 菜品 id)。
+async fn selection_fixture(api: &Api, super_token: &str, label: &str) -> (Uuid, String, Vec<Uuid>) {
+    let canteen = uid(
+        &must(
+            api.call(
+                "POST",
+                "/api/admin/canteens",
+                Some(super_token),
+                Some(json!({"name": format!("{label}食堂")})),
+                None,
+                None,
+            )
+            .await,
+            StatusCode::CREATED,
+            "selection fixture canteen",
+        )
+        .json(),
+        "id",
+    );
+    let (_, cook_id) = register_user(api, super_token, &format!("cook-{label}")).await;
+    must(
+        api.call(
+            "POST",
+            "/api/admin/role-assignments",
+            Some(super_token),
+            Some(json!({"account_id": cook_id, "role": "canteen", "canteen_ids": [canteen]})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "selection fixture assign cook",
+    );
+    let cook = password_login(api, &format!("cook-{label}"), "password-1", "ua-cook-race").await;
+    let mut dishes = Vec::new();
+    for (index, kind) in ["菜", "饭", "汤"].iter().enumerate() {
+        let dish = must(
+            api.call(
+                "POST",
+                &format!("/api/canteens/{canteen}/dishes"),
+                Some(&cook),
+                Some(json!({"name": format!("{label}菜{index}"), "kind": kind})),
+                None,
+                None,
+            )
+            .await,
+            StatusCode::CREATED,
+            "selection fixture dish",
+        )
+        .json();
+        dishes.push(uid(&dish, "id"));
+    }
+    (canteen, cook, dishes)
 }
 
 #[tokio::test]
@@ -4588,4 +4666,150 @@ async fn passkey_usernameless() {
     )
     .json();
     assert_eq!(expired["error"], "passkey_failed");
+}
+
+// 同餐并发写：后端事务内 advisory 锁必须把两个全量 DELETE+INSERT 串行化，
+// 结果是「其中一次成功写的完整替换」，不能是两次写的混合，也不能因写写交错 500。
+#[tokio::test]
+async fn selection_same_meal_concurrent_put_serializes() {
+    let _gate = GATE.lock().await;
+    let api = prepare().await;
+    let super_token = password_login(&api, "root", "root-password-1", "race-root").await;
+    let (canteen, cook, dishes) = selection_fixture(&api, &super_token, "race").await;
+    let uri = format!("/api/canteens/{canteen}/selection/2026-10-10/lunch");
+    let first = json!({"dish_ids": [dishes[0]]});
+    let second = json!({"dish_ids": [dishes[1], dishes[2]]});
+    let (a, b) = tokio::join!(
+        api.call("PUT", &uri, Some(&cook), Some(first.clone()), None, None),
+        api.call("PUT", &uri, Some(&cook), Some(second.clone()), None, None),
+    );
+    for (resp, label) in [(&a, "A"), (&b, "B")] {
+        assert!(
+            resp.status == StatusCode::OK || resp.status == StatusCode::CONFLICT,
+            "同餐并发 PUT {label} 应为 2xx 或 409，实际 {} {}",
+            resp.status,
+            resp.json()
+        );
+        if resp.status == StatusCode::CONFLICT {
+            assert_eq!(
+                resp.json()["error"],
+                "selection_busy",
+                "409 应是可读的 selection_busy"
+            );
+        }
+    }
+    assert!(
+        a.status == StatusCode::OK || b.status == StatusCode::OK,
+        "两次并发写至少一次成功，不能都失败"
+    );
+    let rows: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT dish_id FROM menu_pick WHERE canteen_id = $1 AND meal_date = $2 AND slot = $3",
+    )
+    .bind(canteen)
+    .bind(NaiveDate::from_ymd_opt(2026, 10, 10).unwrap())
+    .bind("lunch")
+    .fetch_all(&api.pool)
+    .await
+    .unwrap();
+    let unique: std::collections::HashSet<Uuid> = rows.iter().copied().collect();
+    assert_eq!(rows.len(), unique.len(), "menu_pick 不应有重复行: {rows:?}");
+    let first_won = sorted_ids(&rows) == sorted_ids(&[dishes[0]]);
+    let second_won = sorted_ids(&rows) == sorted_ids(&[dishes[1], dishes[2]]);
+    assert!(
+        first_won || second_won,
+        "最终状态必须是某一次成功写的完整替换（不能是两次写的混合）: {rows:?}"
+    );
+    if a.status == StatusCode::OK && b.status == StatusCode::CONFLICT {
+        assert!(first_won, "唯一成功的是 A，最终状态必须与 A 一致: {rows:?}");
+    }
+    if b.status == StatusCode::OK && a.status == StatusCode::CONFLICT {
+        assert!(second_won, "唯一成功的是 B，最终状态必须与 B 一致: {rows:?}");
+    }
+    // 读接口与库内一致，确认最后一次成功写确实对外可见。
+    let selected = must(
+        api.call(
+            "GET",
+            &format!("/api/canteens/{canteen}/selection?date=2026-10-10&slot=lunch"),
+            Some(&cook),
+            None,
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "concurrent selection read",
+    )
+    .json();
+    let selected_count: usize = ["菜", "饭", "汤"]
+        .iter()
+        .map(|kind| {
+            selected["groups"][kind]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["selected"] == json!(true))
+                .count()
+        })
+        .sum();
+    assert_eq!(
+        selected_count,
+        rows.len(),
+        "读取到的已选数量应与库内一致: {selected}"
+    );
+}
+
+// 锁等待超时：另一连接持有同一餐的 advisory lock 时，PUT 应在 3s 后得到可读 409，
+// 而不是无限挂住或落成 500。
+#[tokio::test]
+async fn selection_lock_timeout_returns_conflict() {
+    let _gate = GATE.lock().await;
+    let api = prepare().await;
+    let super_token = password_login(&api, "root", "root-password-1", "busy-root").await;
+    let (canteen, cook, dishes) = selection_fixture(&api, &super_token, "busy").await;
+    let date = NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
+    let payload = format!("{canteen}|{date}|lunch");
+    let mut holder = api.pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(&payload)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let resp = api
+        .call(
+            "PUT",
+            &format!("/api/canteens/{canteen}/selection/2026-10-10/lunch"),
+            Some(&cook),
+            Some(json!({"dish_ids": [dishes[0]]})),
+            None,
+            None,
+        )
+        .await;
+    let elapsed = started.elapsed();
+    sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(&payload)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status,
+        StatusCode::CONFLICT,
+        "锁等待超时应返回 409: {}",
+        resp.json()
+    );
+    assert_eq!(resp.json()["error"], "selection_busy");
+    assert!(
+        elapsed >= std::time::Duration::from_secs(2),
+        "应在 lock_timeout 后才返回，实际 {elapsed:?}"
+    );
+    let rows: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT dish_id FROM menu_pick WHERE canteen_id = $1 AND meal_date = $2 AND slot = $3",
+    )
+    .bind(canteen)
+    .bind(date)
+    .bind("lunch")
+    .fetch_all(&api.pool)
+    .await
+    .unwrap();
+    assert!(rows.is_empty(), "锁超时的 PUT 不应写入: {rows:?}");
 }
