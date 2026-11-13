@@ -86,18 +86,22 @@ services:
         condition: any
         delay: 5s
         max_attempts: 0
-      # db 用 start-first：新 db 起来后再停旧的，内部 `db` 短名不断解析；
-      # 否则与 app 同次发版时 app 先起、`db` VIP 不可解析，直接 exit 1（生产同理）。
+      # db 更新用 stop-first（与生产 stack.yml 的 start-first 不同，生产本次不动）：
+      # staging 与生产同机 bind 同一个 PGDATA 目录，start-first 会在旧 postgres 还在写时
+      # 再起一个新 postgres 打开同一 PGDATA（2026-11-10 事故窗口里 db 服务确实被
+      # start-first 更新过，存在双 postgres 同目录风险）。stop-first 的代价是更新期间
+      # 短暂断库；staging 自动部署、无外部用户，可接受，且 app 健康检查 retries=6×10s
+      # 有缓冲。生产要改需单独安排窗口（见 docs/deploy.md §4/§5）。
       update_config:
         parallelism: 1
         delay: 10s
-        order: start-first
+        order: stop-first
         failure_action: pause
         monitor: 60s
         max_failure_ratio: 0
       rollback_config:
         parallelism: 1
-        order: start-first
+        order: stop-first
         monitor: 60s
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U duolinzao"]
@@ -170,8 +174,10 @@ services:
         - "traefik.http.routers.duolinzao-staging.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
         - "traefik.http.services.duolinzao-staging.loadbalancer.server.port=8080"
         - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}"
+    # 就绪探针走回环管理端口（127.0.0.1:8090，只挂 /readyz，查库 SELECT 1；DB 断即 503）。
+    # 8090 只在容器回环监听，不对外发布、不经 Traefik；生产 stack.yml 不动。
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8090/readyz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
