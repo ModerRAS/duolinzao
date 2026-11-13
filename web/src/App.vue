@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { Bell } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { api, explain, personName } from "./api";
@@ -28,26 +28,31 @@ import ThresholdPage from "./pages/ThresholdPage.vue";
 import { auth, can, managedCanteens, refreshSession } from "./session";
 import { loadVersion, versionFooter } from "./version";
 
-type Page =
-  | "overview"
-  | "menu"
-  | "dishEdit"
-  | "optimize"
-  | "alert"
-  | "rating"
-  | "comment"
-  | "change"
-  | "device"
-  | "invite"
-  | "export"
-  | "audit"
-  | "email"
-  | "appSigning"
-  | "threshold"
-  | "recover"
-  | "llm"
-  | "account"
-  | "employee";
+// 页面清单是唯一事实源：type Page 由 ALL_PAGES 推导，避免手工维护两份。
+const ALL_PAGES = [
+  "overview",
+  "menu",
+  "dishEdit",
+  "optimize",
+  "alert",
+  "rating",
+  "comment",
+  "change",
+  "device",
+  "invite",
+  "export",
+  "audit",
+  "email",
+  "appSigning",
+  "threshold",
+  "recover",
+  "llm",
+  "account",
+  "employee",
+] as const;
+type Page = (typeof ALL_PAGES)[number];
+// popstate 的 state 来自历史条目，先按 string 查表再收窄为 Page。
+const PAGE_SET: ReadonlySet<string> = new Set(ALL_PAGES);
 
 interface Note {
   id: string;
@@ -134,29 +139,107 @@ function firstPage(): Page {
   return nav.value.find((item) => item.key !== "employee" && item.key !== "account")?.key ?? "employee";
 }
 
+// 窄屏手机壳 BACK 逐页回退：页面切换时写历史栈，popstate 按栈恢复。
+// 只有窄屏（手机浏览器 / Android WebView 壳）维护历史；桌面端不写历史、
+// 不新增历史条目，浏览器前进/后退仍按整页导航处理，行为与改动前一致。
+type HistoryState = { page: Page; dishId: string | null; emp: boolean };
+
+function currentState(): HistoryState {
+  return { page: page.value, dishId: dishId.value, emp: portraitEmployee.value };
+}
+
+function writeHistory(replace: boolean) {
+  if (typeof window === "undefined" || !isNarrow.value) return;
+  const next = currentState();
+  const cur = window.history.state as Partial<HistoryState> | null;
+  if (
+    !replace && cur && cur.page === next.page &&
+    (cur.dishId ?? null) === (next.dishId ?? null) && (cur.emp ?? false) === next.emp
+  ) {
+    return;
+  }
+  try {
+    if (replace) window.history.replaceState(next, "");
+    else window.history.pushState(next, "");
+  } catch {
+    // 忽略（如受限上下文 pushState 抛错，不挡页面切换）
+  }
+}
+
+function parseHistoryState(state: unknown): HistoryState | null {
+  if (!state || typeof state !== "object") return null;
+  const prev = state as Partial<HistoryState>;
+  if (typeof prev.page !== "string" || !PAGE_SET.has(prev.page)) return null;
+  return {
+    page: prev.page as Page,
+    dishId: typeof prev.dishId === "string" ? prev.dishId : null,
+    emp: prev.emp === true,
+  };
+}
+
+// 默认工作台（与 onMounted / enter 的初始页同一来源），用于历史条目不可用时的兜底。
+function resetToWorkbench() {
+  portraitEmployee.value = false;
+  dishId.value = null;
+  page.value = firstPage();
+}
+
+function applyHistory(state: HistoryState) {
+  // 回退中：直接恢复，不再写历史
+  portraitEmployee.value = state.emp;
+  dishId.value = state.dishId;
+  page.value = state.page;
+}
+
+function onPopState(event: PopStateEvent) {
+  // 桌面端不维护页面历史，popstate 不参与页面恢复。
+  if (!isNarrow.value) return;
+  const next = parseHistoryState(event.state);
+  if (next) {
+    applyHistory(next);
+    return;
+  }
+  // state 缺失/非法（历史条目损坏，或在壳外留下的条目）：不能静默 return，
+  // 否则 BACK 被吃掉、页面停在原处。恢复默认工作台，并把当前条目规范化为合法 state。
+  resetToWorkbench();
+  writeHistory(true);
+}
+
 function toEmployee() {
   portraitEmployee.value = true;
   page.value = "employee";
+  writeHistory(false);
 }
 
 function backToPortrait() {
-  portraitEmployee.value = false;
-  page.value = firstPage();
+  // 员工竖屏是 toEmployee() 推入的历史条目（emp=true）。直接 history.back() 由
+  // popstate 恢复食堂工作台；不能再 push 一条，否则 BACK 会先回到员工端。
+  const cur = window.history.state as Partial<HistoryState> | null;
+  if (isNarrow.value && cur?.emp === true) {
+    window.history.back();
+    return;
+  }
+  // 降级：state 丢失等情况下没有可回退的员工条目，按原路由直接切回工作台。
+  resetToWorkbench();
+  writeHistory(false);
 }
 
 function open(key: Page) {
   if (key === "dishEdit") dishId.value = null;
   page.value = key;
+  writeHistory(false);
 }
 
 function editDish(id: string | null) {
   dishId.value = id;
   page.value = "dishEdit";
+  writeHistory(false);
 }
 
 async function enter() {
   portraitEmployee.value = false;
   page.value = firstPage();
+  writeHistory(true);
   await loadNotes();
 }
 
@@ -197,8 +280,14 @@ onMounted(async () => {
   await refreshSession();
   if (auth.me && hasWorkbench.value) {
     page.value = firstPage();
+    writeHistory(true);
     await loadNotes();
   }
+  window.addEventListener("popstate", onPopState);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("popstate", onPopState);
 });
 </script>
 
@@ -266,7 +355,7 @@ onMounted(async () => {
       <p v-if="needsCanteen && canteens.length === 0" class="muted">当前没有可管理的食堂。</p>
       <OverviewPage v-if="page === 'overview'" />
       <MenuPage v-else-if="page === 'menu'" @edit="editDish" />
-      <DishEditPage v-else-if="page === 'dishEdit'" :dish-id="dishId" @back="page = 'menu'" />
+      <DishEditPage v-else-if="page === 'dishEdit'" :dish-id="dishId" @back="open('menu')" />
       <OptimizePage v-else-if="page === 'optimize'" />
       <AlertPage v-else-if="page === 'alert'" />
       <RatingPage v-else-if="page === 'rating'" />
@@ -281,7 +370,7 @@ onMounted(async () => {
       <RecoverPage v-else-if="page === 'recover'" />
       <LlmPage v-else-if="page === 'llm'" />
       <AppSigningPage v-else-if="page === 'appSigning'" />
-      <AccountPage v-else-if="page === 'account'" @open-devices="page = 'device'" />
+      <AccountPage v-else-if="page === 'account'" @open-devices="open('device')" />
       <div v-else class="phone-wrap">
         <div class="phone"><EmployeePage /></div>
       </div>
