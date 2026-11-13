@@ -576,15 +576,16 @@ pub async fn selection_slot(
     }))
 }
 
-/// 选菜写锁键：同食堂同餐同键（串行），不同餐大概率不同键（互不阻塞；哈希碰撞只会多串行，不影响正确性）。
-fn selection_lock_key(canteen_id: Uuid, date: NaiveDate, slot: &str) -> i64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    canteen_id.hash(&mut hasher);
-    date.hash(&mut hasher);
-    slot.hash(&mut hasher);
-    hasher.finish() as i64
+/// 选菜写锁的稳定键输入：同食堂同餐得到同一把锁，不同餐互不阻塞。
+/// 锁键由数据库侧 hashtextextended 生成，不再依赖 Rust DefaultHasher：
+/// 后者不保证跨 release / 进程一致，滚动发布会把同一餐锁到不同的 advisory lock 上。
+fn selection_lock_payload(canteen_id: Uuid, date: NaiveDate, slot: &str) -> String {
+    format!("{canteen_id}|{date}|{slot}")
+}
+
+/// 锁等待超时：SET LOCAL lock_timeout 触发时 SQLSTATE 为 55P03（lock_not_available）。
+fn is_lock_not_available(err: &sqlx::Error) -> bool {
+    matches!(err, sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03"))
 }
 
 pub async fn put_selection(
@@ -615,10 +616,22 @@ pub async fn put_selection(
     let mut tx = state.pool.begin().await?;
     // 串行同食堂同餐的并发写：全量 DELETE+INSERT 替换必须互斥，否则写写交错变 500 或丢更新。
     // 锁粒度按 (canteen, date, slot) 取键；xact 级锁随事务结束自动释放；last-writer-wins 确定性收敛。
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(selection_lock_key(canteen_id, date, slot))
+    // 锁键取数据库侧稳定哈希：同餐在所有副本 / 所有 Rust 版本上都落到同一把锁上。
+    // 等待上限 3s：并发写不能无限挂住请求，超时映射成可读 409 让前端稍后重试。
+    sqlx::query("SET LOCAL lock_timeout = '3s'")
         .execute(&mut *tx)
         .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(selection_lock_payload(canteen_id, date, slot))
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| {
+            if is_lock_not_available(&err) {
+                AppError::conflict("selection_busy", "该餐正在被修改，请稍后重试")
+            } else {
+                err.into()
+            }
+        })?;
     sqlx::query("DELETE FROM menu_pick WHERE canteen_id = $1 AND meal_date = $2 AND slot = $3")
         .bind(canteen_id)
         .bind(date)
@@ -1340,22 +1353,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selection_lock_key_is_stable_per_meal() {
+    fn selection_lock_payload_is_stable_and_meal_scoped() {
         let canteen = Uuid::new_v4();
         let date = NaiveDate::from_ymd_opt(2026, 11, 13).unwrap();
+        // 稳定串：数据库 hashtextextended 对同样输入永远得到同一把锁，跨进程 / 跨 Rust 版本一致。
+        assert_eq!(
+            selection_lock_payload(canteen, date, "lunch"),
+            format!("{canteen}|{date}|lunch")
+        );
         // 同餐同键：并发写串行化到同一把锁上。
         assert_eq!(
-            selection_lock_key(canteen, date, "lunch"),
-            selection_lock_key(canteen, date, "lunch")
+            selection_lock_payload(canteen, date, "lunch"),
+            selection_lock_payload(canteen, date, "lunch")
         );
-        // 不同餐不同键（大概率）：互不阻塞。
+        // 不同餐不同键：互不阻塞。
         assert_ne!(
-            selection_lock_key(canteen, date, "lunch"),
-            selection_lock_key(canteen, date, "dinner")
+            selection_lock_payload(canteen, date, "lunch"),
+            selection_lock_payload(canteen, date, "dinner")
         );
         assert_ne!(
-            selection_lock_key(canteen, date, "lunch"),
-            selection_lock_key(Uuid::new_v4(), date, "lunch")
+            selection_lock_payload(canteen, date, "lunch"),
+            selection_lock_payload(Uuid::new_v4(), date, "lunch")
         );
     }
 }
