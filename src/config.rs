@@ -54,6 +54,8 @@ pub struct AppConfig {
     pub dish_image_max_bytes: u64,
     pub database_url: String,
     pub bind: SocketAddr,
+    /// 管理回环端口：只挂 /readyz。缺省只绑回环（外部到不了），边界靠绑定地址实现。
+    pub admin_bind: SocketAddr,
     pub cookie_secure: bool,
     pub trust_proxy: bool,
     pub static_dir: Option<String>,
@@ -203,6 +205,10 @@ impl AppConfig {
             .unwrap_or_else(|| "0.0.0.0:8080".into())
             .parse()
             .map_err(|_| "server.bind 不是合法地址".to_string())?;
+        let admin_bind = optional_string(server, "admin_bind")
+            .unwrap_or_else(|| "127.0.0.1:8090".into())
+            .parse()
+            .map_err(|_| "server.admin_bind 不是合法地址".to_string())?;
         // 生产默认 true：即使后端容器只听 HTTP（TLS 由 Traefik 等网关终结），
         // 浏览器也只在 HTTPS 下回送 Secure Cookie。本地 HTTP 直连/e2e 才显式配 false。
         let cookie_secure = optional_bool(server, "cookie_secure").unwrap_or(true);
@@ -238,6 +244,7 @@ impl AppConfig {
             dish_image_max_bytes: dish_image_max_bytes.unwrap(),
             database_url: database_url.unwrap(),
             bind,
+            admin_bind,
             cookie_secure,
             trust_proxy,
             static_dir,
@@ -263,8 +270,9 @@ fn apply_env_overrides(
     value: &mut Value,
     get: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(), String> {
-    const RULES: [(&[&str], &str); 9] = [
+    const RULES: [(&[&str], &str); 10] = [
         (&["server", "app_dir"], "DLZ_APP_DIR"),
+        (&["server", "admin_bind"], "DLZ_ADMIN_BIND"),
         (&["server", "apk_auto_sign"], "DLZ_APK_AUTO_SIGN"),
         (&["email", "delivery"], "DLZ_EMAIL_DELIVERY"),
         (&["database", "url"], "DLZ_DATABASE_URL"),
@@ -567,6 +575,20 @@ mod tests {
         let raw = example_config();
         let config = AppConfig::parse(&raw).expect("显式 false");
         assert!(!config.cookie_secure);
+    }
+
+    #[test]
+    fn admin_bind_defaults_to_loopback() {
+        let config = AppConfig::parse(&example_config()).expect("缺省回环");
+        assert_eq!(config.admin_bind.to_string(), "127.0.0.1:8090");
+        let raw = example_config().replace("[server]", "[server]\nadmin_bind = \"127.0.0.1:8190\"");
+        let config = AppConfig::parse(&raw).expect("显式 admin_bind");
+        assert_eq!(config.admin_bind.to_string(), "127.0.0.1:8190");
+        let env = env_map(&[("DLZ_ADMIN_BIND", " 127.0.0.1:8191 ")]);
+        let config =
+            AppConfig::parse_with_env(&example_config(), &|k| env.get(k).cloned())
+                .expect("env 覆盖");
+        assert_eq!(config.admin_bind.to_string(), "127.0.0.1:8191");
     }
 
     #[test]

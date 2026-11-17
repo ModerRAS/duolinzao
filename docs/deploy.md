@@ -7,14 +7,20 @@
 ## 0. 与代码的关系
 
 - 数据库迁移在**应用启动时自动运行**（`src/main.rs` 里 `sqlx::migrate!`），无需手工 `sqlx migrate run`；回滚镜像不会回滚迁移（迁移只向前，见第 5 节）。
-- 健康探针 `GET /healthz`（纯文本 `ok`，不查库、不登录、免 CSRF），Traefik/CI 只看它；`GET /api/health` 仍在。
+- 健康探针分两层，别混：
+  - `GET /healthz`（生产公网端口 8080，纯文本 `ok`）**只证明进程在听**，不查库、不登录、免 CSRF；Traefik/CI 的公网健康检查用它，`GET /api/health` 仍在。
+  - `GET /readyz` **只挂管理回环端口** `server.admin_bind`（缺省 `127.0.0.1:8090`，可用 `DLZ_ADMIN_BIND` 或 config 的 `[server] admin_bind` 覆盖）：真查库（`SELECT 1`，2s 短超时；DB 断/超时回 503 `{"error":"db_unavailable"}`）。该端口只在容器回环监听、不 publish、不经 Traefik；**公网没有 `/readyz` 路由**，公网打过去会被 SPA fallback 吃掉：body 是 `index.html`（`Content-Type: text/html`），状态码 404（tower-http 的 `ServeDir::not_found_service` 固定 404）——那跟就绪无关，不要拿它当探针。
+  - 生产 `deploy/stack.yml` 的 app healthcheck **本次仍是 `/healthz`**（有意：避免 DB 短暂维护时整个 app 被 Swarm 判死；防复发先覆盖 staging）。staging `deploy/stack.staging.yml` 的 healthcheck 已改为容器内 `127.0.0.1:8090/readyz`，DB 不可用即 unhealthy。
+  - `server.admin_bind` 若与 `server.bind` 相同，进程启动即报错（双监听撞车）；显式配成非回环地址时启动会打 `tracing::warn`（等于把查库探针暴露到该网卡，需确认有意）。
 - 敏感配置全部走 external docker secret，应用从 `DLZ_*_FILE`（即 `/run/secrets/*`）读取，相关单测在 `src/config.rs`（`parse_with_env`）。
 
 ## 1. 首次准备（manager 上，一次性）
 
 ### 1.1 节点打标
 
-stack 用 `node.labels.duolinzao.role` 做 placement（`app` 跑应用，`db` 跑 Postgres），先核对并打标：
+stack 用 `node.labels.duolinzao.role` 做 placement（`app` 跑应用，`db` 跑 Postgres），先核对并打标。
+
+> **拓扑前提**：本仓库的部署与 CI 检查假定 **manager 节点就是 app 节点**（`role=app`）。staging 冒烟与 db 健康判据都靠在 manager 上 `docker exec` app 容器完成（`docker exec` 只作用于本节点，见 §6.4）。把 app 调度到别的节点而不同步改 CI，这两步会失败（日志显式打 `CTR_MISSING`/找不到容器）。
 
 ```bash
 docker node ls
@@ -101,7 +107,7 @@ deploy job 条件：主仓 + `refs/heads/master` + `push` 事件。fork 的 mast
 
 1. `test` / `e2e` / `e2e-scale` 全绿 → `image` 构建并推 `ghcr.io/moderras/duolinzao:sha-<commit>`（+ `latest`）。
 2. `deploy`：算 `CONFIG_VERSION`（`deploy/config.toml` 的 sha256 前 12 位，配置一改名一变即触发服务更新），scp `stack.yml` + `config.toml` 到 `DEPLOY_PATH`；`IMAGE_TAG`/`DLZ_DOMAIN`/Traefik 四变量/`CONFIG_VERSION` 注入后 `docker stack deploy -c stack.yml --with-registry-auth duolinzao`。
-3. 先轮询 `duolinzao_db`：有 Running 任务且 `UpdateStatus` 非 rollback/paused（约 2 分钟超时即失败）；再轮询 `duolinzao_app`：spec 或运行中任务的镜像以新 tag 为前缀即可（允许 Swarm 解析后的 `@sha256:...`），且有 Running 任务、`UpdateStatus` 非 rollback/paused（10 分钟超时即失败；`failure_action: rollback` 已由 Swarm 自动回滚）。db 用 start-first（新 db 起来后再停旧的，overlay 上 `db` VIP 不断），否则与 app 同次发版时 app 会因 `db` 解析失败（Name or service not known）直接 exit 1；app 保持 stop-first（内存限制）。
+3. 先轮询 `duolinzao_db`，**三个条件同时满足才算就绪**：`UpdateStatus.State` 为空或 `completed`（`updating` 不算完成——2026-11-10 事故就是 update=updating 时被放行的）、至少 1 个 Running 任务、且 DB 健康（等价于 `docker ps --filter health=healthy`；两节点拓扑下 db 在 worker、manager 的 `docker ps` 看不到它的容器，改用 app 容器回环查库接口 `/api/session/methods` 返回 200 判定，语义同 `pg_isready`，`/healthz` 不查库不能替）。rollback/paused 立即失败，约 2 分钟超时即失败；再轮询 `duolinzao_app`：spec 或运行中任务的镜像以新 tag 为前缀即可（允许 Swarm 解析后的 `@sha256:...`），且有 Running 任务、`UpdateStatus` 非 rollback/paused（10 分钟超时即失败；`failure_action: rollback` 已由 Swarm 自动回滚）。生产 db 仍是 start-first（新 db 起来后再停旧的，overlay 上 `db` VIP 不断），否则与 app 同次发版时 app 会因 `db` 解析失败（Name or service not known）直接 exit 1；**staging 的 db 已改 stop-first**（同机 bind PGDATA，start-first 会让两个 postgres 打开同一目录；代价是更新期间短暂断库，自动部署可接受，见 §6.4）；app 两环境都保持 stop-first（内存限制）。
 4. runner `curl https://域名/healthz` 重试 5 分钟。
 5. `docker image prune -f` 清旧镜像。
 
@@ -110,6 +116,9 @@ deploy job 条件：主仓 + `refs/heads/master` + `push` 事件。fork 的 mast
 - 自动：更新失败 Swarm 按 `update_config.failure_action: rollback` 回滚到上一版（`rollback_config` 已配）。
 - 手动：`docker service rollback duolinzao_app`。
 - 定版回滚：`DEPLOY_PATH=<同部署路径> IMAGE_TAG=sha-<旧commit> DLZ_DOMAIN=... TRAEFIK_ENTRYPOINT=... TRAEFIK_CERTRESOLVER=... TRAEFIK_NETWORK=... CONFIG_VERSION=... docker stack deploy -c stack.yml --with-registry-auth duolinzao`（DEPLOY_PATH 必须传，bind 路径靠它拼），或在 Actions 里对旧 commit 重跑 workflow（tag 不可变，旧镜像还在）。
+- **回滚到不带 8090 管理端口的旧镜像**（本 PR 之前的 image）时要连 stack 文件一起回退，否则 staging 的 healthcheck 调 `127.0.0.1:8090/readyz` 必失败、Swarm 判 unhealthy 反复重启：
+  - `docker service rollback duolinzao-staging_app` 回的是上一份服务 spec（含当时的 healthcheck），镜像/栈文件天然配套，一般可直接用；
+  - 但「定版回滚」用当前 `stack.yml` + 旧 `IMAGE_TAG` 时，会把新 healthcheck(/readyz) 和旧镜像（无 8090）拼在一起 → 不健康。此时要同时把 manager 上的 `stack.yml` 换成与旧镜像同期的版本，或临时把该服务 healthcheck 改回 `/healthz` 再发。生产 healthcheck 仍是 `/healthz`，不受此影响。
 - 注意：**迁移不回滚**。应用启动只向前迁移；回滚代码前确认旧代码兼容新表结构（一期 schema 只增不改，安全）。
 
 ## 5. 日常运维速查
@@ -119,10 +128,16 @@ docker stack services duolinzao
 docker service ps duolinzao_app --no-trunc
 docker service logs -f duolinzao_app
 curl -fsS https://<域名>/healthz
+# 就绪探针只在容器回环管理端口（公网没有）：DB 断时返回 503，是查库探针
+docker exec $(docker ps -qf name=duolinzao_app | head -1) curl -fsS http://127.0.0.1:8090/readyz
 docker volume ls | grep duolinzao   # 正常应无 duolinzao 卷：持久数据走 DEPLOY_PATH 下 bind mount
 ```
 
 db 数据在宿主机目录 `DEPLOY_PATH/pgdata`（bind mount，随 db 节点 placement 固定）。备份即 tar 文件夹：`tar czf /backup/pg-$(date +%F).tgz -C <DEPLOY_PATH> pgdata`（停服或接受 crash-consistent）。恢复：停 db 服务后解压回去，保证属主仍是 UID 999。
+
+**db 更新前先备份**：只要某次发版会动 db 服务的 spec（镜像/配置/资源），建议先做一次上面这行 tar（低峰期发版）。事故（2026-11-10）里 db 的 WAL/PGDATA 损坏，恢复成本远高于一次备份；staging 也建议保持这个习惯。
+
+**生产 db start-first 的风险与待办（本次未改）**：`deploy/stack.yml` 的 db 仍是 `start-first` + 同机 bind `PGDATA`。理论上新任务先起、旧任务后停，但一旦调度时序异常或新实例失败，两个 postgres 可能打开同一 PGDATA，是本次事故的潜在触发点之一。本次只把 staging 改为 stop-first 并收紧 CI 门禁；**生产改 stop-first 要单独安排维护窗口**（更新期间 db 有 10~30s 不可用、app 会短暂报错），列入待办，不要在普通发版里顺手改。
 
 ## 6. 测试服（staging）
 
@@ -177,12 +192,19 @@ manager 上仍需手工做两件事：建好 staging 数据目录（各会跑 ap
 
 ### 6.4 部署与验证
 
-每次 master push 全绿后自动：检查配置 → 确保 5 个 `dlz_stg_*` secret（缺才建）→ scp `stack.staging.yml` + `config.staging.toml`（随即在远端改名为 `stack.yml` / `config.toml`，与生产同形；stack 文件里的 `file: ./config.toml` 与改名后一致）→ `docker stack deploy ... duolinzao-staging` → 先等 `duolinzao-staging_db` 就绪（有 Running 且非 rollback/paused）再轮询 `duolinzao-staging_app` 收敛 → `curl https://staging 域名/healthz`。db start-first、app stop-first 与生产一致。生产发布流程不变。
+每次 master push 全绿后自动：检查配置 → 确保 5 个 `dlz_stg_*` secret（缺才建）→ scp `stack.staging.yml` + `config.staging.toml`（随即在远端改名为 `stack.yml` / `config.toml`，与生产同形；stack 文件里的 `file: ./config.toml` 与改名后一致）→ `docker stack deploy ... duolinzao-staging` → 先等 `duolinzao-staging_db` 就绪（`UpdateStatus.State` 为空/ `completed` + 至少 1 个 Running + DB 健康，判据见 §3 第 3 步）再轮询 `duolinzao-staging_app` 收敛 → `curl https://staging 域名/healthz` → **业务冒烟（查库）**。
+
+**业务冒烟（本次补的 P0 洞）**：`/healthz` 只证明进程活着，DB 断时 staging 照样全绿。这一步在 runner 上 SSH 到 manager，`docker exec` 进 `duolinzao-staging_app` 容器，调容器回环 `http://127.0.0.1:8080/api/session/methods`（匿名 GET、必查库 `email_enabled`），要求 200，30×10s 重试，失败即 fail job 并保留 `docker service ps/logs`。用的是容器内回环、不经 Traefik 公网，也**没有**给 `/readyz` 开公网入口。**它依赖 app 容器在 manager 节点上**（文档拓扑即 app 在 manager）；容器不在本节点时日志显式打 `http=CTR_MISSING`，不会静默变红。
+
+staging 与生产有两处有意差异：db 更新 order（staging 已 stop-first，生产仍 start-first，原因与待办见 §5）、app healthcheck（staging 用 `/readyz`，生产仍 `/healthz`，见 §0）。除收紧 db 门禁判据外，生产发布流程不变。
 
 ```bash
 docker stack services duolinzao-staging
 docker service logs -f duolinzao-staging_app
 curl -fsS https://staging.example.com/healthz
+# 手动复核两个探针（都在容器回环，公网没有）：readyz 查库，methods 是冒烟同款
+docker exec $(docker ps -qf name=duolinzao-staging_app | head -1) curl -fsS http://127.0.0.1:8090/readyz
+docker exec $(docker ps -qf name=duolinzao-staging_app | head -1) curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/api/session/methods
 ```
 
 ### 6.5 邮件验证码怎么看（log 模式）

@@ -40,6 +40,9 @@ max_bytes = "REPLACE_ME"
 
 [server]
 bind = "0.0.0.0:8080"
+# 管理回环端口：只挂 /readyz 就绪探针。缺省 127.0.0.1:8090（只绑回环，外部到不了）；
+# 边界靠绑定地址实现，不判 IP、不加 token。如需改地址再显式配置。
+# admin_bind = "127.0.0.1:8090"
 # 生产必须 true：即使后端容器只听 HTTP（TLS 由 Traefik/Swarm 网关终结），
 # 浏览器也只在 HTTPS 下回送 Secure Cookie。仅本地 HTTP 直连开发或 e2e 才改为 false。
 cookie_secure = true
