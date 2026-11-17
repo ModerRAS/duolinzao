@@ -42,11 +42,20 @@ import { auth } from "../session";
 import { appVersion, loadVersion } from "../version";
 
 type Tab = "meal" | "score" | "mine";
-type Screen = "home" | "shift" | "week" | "generate" | "preview" | "mine" | "bind" | "devices" | "notices" | "account";
+type Screen = "home" | "shift" | "week" | "mine" | "bind" | "devices" | "notices" | "account";
 
+interface CycleSlots {
+  breakfast: boolean;
+  lunch: boolean;
+  dinner: boolean;
+}
+interface CycleDay extends CycleSlots {
+  weekday: number;
+}
 interface Shift {
   kind: string | null;
   anchor_date: string | null;
+  dsl: { slots: CycleSlots; week: CycleDay[] } | null;
 }
 interface MealItem {
   date: string;
@@ -55,12 +64,6 @@ interface MealItem {
   ordering: boolean;
   locked: boolean;
   color: string;
-}
-interface PreviewSlot {
-  ordering: boolean;
-  color: string;
-  canteen_id: string | null;
-  locked?: boolean;
 }
 interface HomeMenu {
   菜: string[];
@@ -77,11 +80,7 @@ interface HomeNext {
 interface HomeDay {
   date: string;
   locked: boolean;
-  slots: Record<Slot, { state: "locked" | "ordering" | "skip" | "unset" }>;
-}
-interface PreviewDay {
-  date: string;
-  slots: Record<Slot, PreviewSlot>;
+  slots: Record<Slot, { state: "ordering" | "skip" | "unset"; locked: boolean }>;
 }
 interface Target {
   dish_id: string;
@@ -129,9 +128,6 @@ const meals = ref<MealItem[]>([]);
 const lockedDates = ref<string[]>([]);
 const homeNext = ref<HomeNext | null>(null);
 const homeDays = ref<HomeDay[]>([]);
-const description = ref("");
-const templateId = ref<string | null>(null);
-const preview = ref<PreviewDay[]>([]);
 const scoreDate = ref(shanghaiToday());
 const scoreSlot = ref<Slot>("lunch");
 const scoreKind = ref<Kind>("菜");
@@ -153,8 +149,6 @@ const title = computed(() => {
   if (tab.value === "score") return "评分";
   if (screen.value === "shift") return "选择班制";
   if (screen.value === "week") return weekTitle(weekAnchor.value);
-  if (screen.value === "generate") return "用描述生成模板";
-  if (screen.value === "preview") return "模板预览";
   if (screen.value === "bind") return "绑定食堂";
   if (screen.value === "devices") return "设备与通行密钥";
   if (screen.value === "notices") return "站内提示";
@@ -225,8 +219,7 @@ function draftOf(id: string) {
 }
 
 function back() {
-  if (screen.value === "generate" || screen.value === "preview") screen.value = "shift";
-  else if (tab.value === "mine") screen.value = "mine";
+  if (tab.value === "mine") screen.value = "mine";
   else screen.value = "home";
 }
 
@@ -269,13 +262,6 @@ async function loadWeek() {
   lockedDates.value = body.locked_dates ?? [];
 }
 
-async function loadPreview() {
-  await loadBound();
-  const body = await api<{ id: string | null; preview: PreviewDay[] }>("/api/me/meal-template");
-  templateId.value = body.id;
-  preview.value = body.preview ?? [];
-}
-
 async function loadBind() {
   const [all, mine] = await Promise.all([
     api<{ items: Canteen[] }>("/api/canteens"),
@@ -316,9 +302,7 @@ async function refresh() {
     if (screen.value === "home") await loadHome();
     else if (screen.value === "shift") {
       await Promise.all([loadShift(), loadBound()]);
-    } else if (screen.value === "week") await loadWeek();
-    else if (screen.value === "generate") await loadBound();
-    else if (screen.value === "preview") await loadPreview();
+    }     else if (screen.value === "week") await loadWeek();
     else if (screen.value === "bind") await loadBind();
     else if (screen.value === "devices") await loadDevices();
     else if (screen.value === "notices" || screen.value === "mine") await loadNotes();
@@ -352,7 +336,7 @@ async function saveWork2() {
       }),
     });
     showSuccessToast("已设为上二休四");
-    screen.value = "home";
+    await loadShift();
   } catch (error) {
     toastError(error);
   }
@@ -367,7 +351,7 @@ async function saveCustom() {
       body: JSON.stringify({ kind: "custom", canteen_id: canteenId }),
     });
     showSuccessToast("已设为自定义排班");
-    screen.value = "home";
+    await loadShift();
   } catch (error) {
     toastError(error);
   }
@@ -378,18 +362,19 @@ function openCurrentWeek() {
   screen.value = "week";
 }
 
-async function generate() {
+async function toggleCycle(slot: Slot, weekday?: number) {
+  const dsl = shift.value?.dsl;
+  if (!dsl || !shift.value?.kind) return;
+  const ordering =
+    shift.value.kind === "work2_rest4"
+      ? !dsl.slots[slot]
+      : !(dsl.week.find((day) => day.weekday === weekday)?.[slot] ?? false);
   try {
-    await api("/api/meal-templates/generate", {
-      method: "POST",
-      body: JSON.stringify({
-        description: description.value,
-        anchor_date: anchor.value || null,
-        canteen_id: mealCanteen.value || null,
-      }),
+    await api("/api/me/meal-cycle", {
+      method: "PUT",
+      body: JSON.stringify({ slot, ordering, weekday: weekday ?? null }),
     });
-    showSuccessToast("模板已写入");
-    screen.value = "preview";
+    await loadShift();
   } catch (error) {
     toastError(error);
   }
@@ -409,40 +394,6 @@ async function toggleMeal(date: string, slot: Slot) {
       body: JSON.stringify({ ordering, canteen_id: ordering ? mealCanteen.value : current?.canteen_id ?? null }),
     });
     await loadWeek();
-  } catch (error) {
-    toastError(error);
-  }
-}
-
-async function togglePreview(day: PreviewDay, slot: Slot) {
-  if (!templateId.value) return;
-  const current = day.slots[slot];
-  if (current.locked) return;
-  const ordering = !current.ordering;
-  if (ordering && !mealCanteen.value) {
-    showFailToast("报餐需要选择食堂");
-    return;
-  }
-  try {
-    const body = await api<{ ordering?: boolean; color: string; locked: boolean; order_updated: boolean }>(
-      `/api/meal-templates/${templateId.value}/slots`,
-      {
-        method: "PUT",
-        body: JSON.stringify({
-          date: day.date,
-          slot,
-          ordering,
-          canteen_id: ordering ? mealCanteen.value : current.canteen_id,
-        }),
-      },
-    );
-    if (body.locked) {
-      current.locked = true;
-      showFailToast("该餐已锁定");
-      return;
-    }
-    current.ordering = ordering;
-    current.color = body.color;
   } catch (error) {
     toastError(error);
   }
@@ -533,18 +484,22 @@ function dayLocked(date: string) {
   return lockedDates.value.includes(date) || SLOTS.some((slot) => cell(date, slot)?.locked);
 }
 
-function mealClass(date: string, slot: Slot) {
-  if (dayLocked(date)) return "locked";
+function mealTone(date: string, slot: Slot) {
   const item = cell(date, slot);
   if (item?.ordering) return "yes";
   if (item) return "no";
   return "unset";
 }
 
-function previewClass(slot: PreviewSlot) {
-  if (slot.locked) return "locked";
-  if (slot.color === "green" || slot.ordering) return "yes";
-  return "no";
+function mealClass(date: string, slot: Slot) {
+  const tone = mealTone(date, slot);
+  return dayLocked(date) ? `${tone} is-locked` : tone;
+}
+
+function mealText(date: string, slot: Slot) {
+  const mark = mealTone(date, slot) === "yes" ? "报" : mealTone(date, slot) === "no" ? "不报" : "未定";
+  const name = SLOT_SHORT[slot];
+  return dayLocked(date) ? `${name} ${mark} 已锁定` : name;
 }
 
 function homeClass(state: string) {
@@ -615,8 +570,8 @@ onMounted(() => {
               v-for="slot in SLOTS"
               :key="slot"
               class="status"
-              :class="homeClass(day.slots[slot].state)"
-            >{{ homeLabel(day.slots[slot].state) }}</span>
+              :class="[homeClass(day.slots[slot].state), day.slots[slot].locked ? 'is-locked' : '']"
+            >{{ homeLabel(day.slots[slot].state) }}<template v-if="day.slots[slot].locked"> · 已锁</template></span>
           </div>
         </section>
         <div class="pills">
@@ -626,7 +581,7 @@ onMounted(() => {
       </template>
 
       <template v-else-if="tab === 'meal' && screen === 'shift'">
-        <p class="hint">只有上二休四和自定义排班。用描述生成模板是子流程，不是第三种班制。</p>
+        <p class="hint">只有上二休四和自定义排班。下面的循环会一直往后生成；某一天要例外，用手动改报餐。</p>
         <div v-if="bound.length" class="pills">
           <button
             v-for="item in bound"
@@ -646,51 +601,44 @@ onMounted(() => {
         </section>
         <section class="panel">
           <h3>自定义排班</h3>
-          <p class="hint">不自动生成休息日以外的报餐，之后在首页或本周报餐里逐餐填写。</p>
+          <p class="hint">先保存，再在下面点每周哪几天的哪一餐。没点开的餐不会自动报。</p>
           <van-button type="primary" block round @click="saveCustom">保存</van-button>
         </section>
-        <van-button block plain type="primary" @click="screen = 'generate'">用描述生成模板</van-button>
-      </template>
-
-      <template v-else-if="tab === 'meal' && screen === 'generate'">
-        <van-notice-bar wrapable text="按总管理已保存的全站渠道顺序生成，并写入个人模板。员工不填写 key。" />
-        <van-field v-model="description" type="textarea" rows="5" maxlength="2000" show-word-limit placeholder="描述你的班制" />
-        <label class="field-label">锚点日（可选）</label>
-        <input v-model="anchor" type="date" class="date" />
-        <van-button type="primary" block round class="gap" @click="generate">生成并预览</van-button>
-      </template>
-
-      <template v-else-if="tab === 'meal' && screen === 'preview'">
-        <p class="hint">绿色是报餐，橙色是不报。已锁定是灰色，不能改。点未锁定的餐次会写回个人模板。</p>
-        <div v-if="bound.length" class="pills">
-          <button
-            v-for="item in bound"
-            :key="item.id"
-            type="button"
-            class="pill"
-            :class="{ on: item.id === mealCanteen }"
-            @click="mealCanteen = item.id"
-          >{{ item.name }}</button>
-        </div>
-        <van-empty v-if="!templateId" description="还没有个人模板" />
-        <article v-for="day in preview" :key="day.date" class="panel">
-          <h3>{{ weekdayLabel(day.date) }} {{ day.date.slice(5) }}</h3>
+        <section v-if="shift?.kind === 'work2_rest4' && shift.dsl" class="panel">
+          <h3>工作日吃哪几餐</h3>
+          <p class="hint">点一下改整个循环。已经锁定的餐不变。某一天例外去手动改报餐。</p>
           <div class="pills">
             <button
               v-for="slot in SLOTS"
               :key="slot"
               type="button"
               class="pill"
-              :class="previewClass(day.slots[slot])"
-              :disabled="!!day.slots[slot].locked"
-              @click="togglePreview(day, slot)"
-            >{{ day.slots[slot].locked ? `${SLOT_SHORT[slot]} 已锁定` : SLOT_SHORT[slot] }}</button>
+              :class="shift.dsl.slots[slot] ? 'yes' : 'no'"
+              @click="toggleCycle(slot)"
+            >{{ SLOT_NAME[slot] }} {{ shift.dsl.slots[slot] ? "报" : "不报" }}</button>
           </div>
-        </article>
+        </section>
+        <section v-else-if="shift?.kind === 'custom' && shift.dsl" class="panel">
+          <h3>每周循环</h3>
+          <p class="hint">点一下改这一星期的这一餐，之后每周都按这个生成。已经锁定的餐不变。</p>
+          <article v-for="day in shift.dsl.week" :key="day.weekday" class="cycle-day">
+            <strong>{{ ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][day.weekday - 1] }}</strong>
+            <div class="pills">
+              <button
+                v-for="slot in SLOTS"
+                :key="slot"
+                type="button"
+                class="pill"
+                :class="day[slot] ? 'yes' : 'no'"
+                @click="toggleCycle(slot, day.weekday)"
+              >{{ SLOT_SHORT[slot] }} {{ day[slot] ? "报" : "不报" }}</button>
+            </div>
+          </article>
+        </section>
       </template>
 
       <template v-else-if="tab === 'meal' && screen === 'week'">
-        <van-notice-bar wrapable text="跨食堂按当前选中的食堂生效。锁定时间一到，次日三餐一起锁定。" />
+        <van-notice-bar wrapable text="跨食堂按当前选中的食堂生效。锁定时间一到，次日三餐一起锁定。锁定后仍能看出报或不报。这里只改这一天。" />
         <div class="pills">
           <button type="button" class="pill" @click="weekAnchor = addDays(weekAnchor, -7)">上一周</button>
           <button type="button" class="pill" @click="weekAnchor = addDays(weekAnchor, 7)">下一周</button>
@@ -718,7 +666,7 @@ onMounted(() => {
               :disabled="dayLocked(day)"
               @click="toggleMeal(day, slot)"
             >
-              {{ dayLocked(day) ? `${SLOT_SHORT[slot]} 已锁定` : SLOT_SHORT[slot] }}
+              {{ mealText(day, slot) }}
             </button>
           </div>
           <p v-if="cell(day, 'breakfast')?.canteen_id || cell(day, 'lunch')?.canteen_id || cell(day, 'dinner')?.canteen_id" class="hint">
@@ -903,7 +851,7 @@ onMounted(() => {
 }
 .status.yes { background: #e7f6ec; color: #1f7a3a; border-color: #b7e4c7; }
 .status.no { background: #fff4e5; color: #b86e00; border-color: #f3d19e; }
-.status.locked { background: #f3f4f6; color: #9ca3af; border-color: #e5e7eb; }
+.status.is-locked { box-shadow: inset 0 0 0 1px #9ca3af; }
 .gap { margin-top: 10px; }
 .panel { background: #fff; border-radius: 12px; padding: 12px; margin: 10px 0; }
 .panel h3, .block-title { margin: 8px 0; font-size: 15px; }
@@ -916,7 +864,12 @@ onMounted(() => {
 .pill.on, .pill.yes { background: #2d8a45; color: #fff; border-color: #2d8a45; }
 .pill.no { background: #e6a23c; color: #fff; border-color: #e6a23c; }
 .pill.unset { background: #fff; color: #374151; }
-.pill.locked, .pill:disabled { background: #e5e7eb; color: #9ca3af; border-color: #e5e7eb; cursor: not-allowed; }
+.pill:disabled { cursor: not-allowed; }
+.pill:disabled.yes { background: #2d8a45; color: #fff; border-color: #2d8a45; }
+.pill:disabled.no { background: #e6a23c; color: #fff; border-color: #e6a23c; }
+.pill:disabled.unset { background: #f3f4f6; color: #6b7280; border-color: #e5e7eb; }
+.cycle-day { margin-top: 8px; }
+.cycle-day strong { font-size: 13px; }
 .dish { display: flex; gap: 10px; align-items: flex-start; }
 .dish-main { flex: 1; min-width: 0; }
 .tag { margin-right: 4px; }

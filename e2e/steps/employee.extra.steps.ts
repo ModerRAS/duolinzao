@@ -20,7 +20,7 @@ import {
 
 const { Given, When, Then } = createBdd(test);
 
-// ---- 用描述生成模板并写入个人 DSL ----
+// ---- 描述生成已从一期界面隐藏，步骤留给 @wip。循环改在 employee.steps.ts。 ----
 Given("员工已登录且总管已配置至少一条可用 LLM 渠道", async ({ page }) => {
   await ensureLoggedIn(page);
   // 本地脚本渠道即可成功生成，无需外部 LLM（见 scripts/e2e.sh + setup-roles.mjs）。

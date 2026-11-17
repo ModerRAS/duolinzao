@@ -399,10 +399,34 @@ export async function ensureSelection(
   slot: string,
   dishIds: string[],
 ) {
-  const r = await s.call(`/api/canteens/${canteenId}/selection/${date}/${slot}`, {
-    method: "PUT",
-    body: { dish_ids: dishIds },
+  const put = () =>
+    s.call(`/api/canteens/${canteenId}/selection/${date}/${slot}`, {
+      method: "PUT",
+      body: { dish_ids: dishIds },
+    });
+  let r = await put();
+  if (r.status === 200) return;
+  // 开饭后供应冻结。测试要补写已过去的餐次时，先把钟拨回那天零点，写完再拨回去。
+  if (r.json?.error !== "menu_frozen") {
+    throw new Error(`selection failed: ${r.status} ${JSON.stringify(r.json)}`);
+  }
+  const clock = await s.call("/api/test/clock");
+  const prev = clock.json?.now as string | null | undefined;
+  const shifted = await s.call("/api/test/clock", {
+    method: "POST",
+    body: { now: `${date}T00:00:00+08:00` },
   });
+  if (shifted.status !== 200) {
+    throw new Error(`selection clock failed: ${shifted.status} ${JSON.stringify(shifted.json)}`);
+  }
+  try {
+    r = await put();
+  } finally {
+    await s.call("/api/test/clock", {
+      method: "POST",
+      body: prev ? { now: prev } : { clear: true },
+    });
+  }
   if (r.status !== 200) throw new Error(`selection failed: ${r.status} ${JSON.stringify(r.json)}`);
 }
 

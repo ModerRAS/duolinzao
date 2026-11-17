@@ -56,9 +56,9 @@ When("在登录页展开密码登录并提交正确账号密码", async ({ page 
 });
 
 // Then「进入横屏工作台」与 canteen 的同名 When 共用 canteen.steps.ts 的定义。
-Then("侧栏可见食堂运营项与总管项（导出、审计、邮箱、阈值、找回、LLM）", async ({ page }) => {
+Then("侧栏可见食堂运营项与总管项（导出、审计、邮箱、阈值、找回）", async ({ page }) => {
   const side = page.locator(".side");
-  for (const label of ["人数总览", "菜谱", "选菜优化", "导出", "审计", "邮箱", "阈值", "找回", "LLM"]) {
+  for (const label of ["人数总览", "菜谱", "选菜优化", "导出", "审计", "邮箱", "阈值", "找回"]) {
     await expect(side.getByRole("button", { name: label })).toBeVisible();
   }
 });
@@ -76,6 +76,32 @@ Then("食堂创建成功并出现在可选食堂列表", async ({ page }) => {
   await page.locator(".canteen-row .el-select").click();
   await expect(page.getByRole("option", { name: newCanteen })).toBeVisible();
   await page.keyboard.press("Escape");
+});
+
+When("把工作台收成窄屏并打开更多", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const more = page.locator(".portrait .nav").getByRole("button", { name: /更多/ });
+  await expect(more).toBeVisible();
+  await more.click();
+});
+
+Then("可以看到新建食堂", async ({ page }) => {
+  await expect(page.getByPlaceholder("新食堂名称")).toBeVisible();
+  await expect(page.getByRole("button", { name: "新建食堂" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "LLM", exact: true })).toHaveCount(0);
+});
+
+When("在窄屏提交一个新食堂名称", async ({ page }) => {
+  newCanteen = uniqueTag("窄食堂");
+  await page.getByPlaceholder("新食堂名称").fill(newCanteen);
+  await page.getByRole("button", { name: "新建食堂" }).click();
+});
+
+Then("窄屏提示食堂已建立", async ({ page }) => {
+  await expect(page.getByText("食堂已建立")).toBeVisible({ timeout: 10000 });
+  const s = await rootSession();
+  expect(await canteenIdByName(s, newCanteen)).toBeTruthy();
+  await expect(page.locator(".side")).toHaveCount(0);
 });
 
 Then("总管对该食堂拥有全局范围能力", async () => {
@@ -213,7 +239,7 @@ When("打开选菜优化周视图并进入当餐勾选", async ({ page }) => {
   await page.getByRole("option", { name: canteen }).click();
   await openSide(page, "选菜优化");
   await expect(page.getByText("周一到周日 · 点某一餐进入选定")).toBeVisible();
-  await page.locator("button.slot-cell").first().click();
+  await page.locator("button.slot-cell").filter({ hasNotText: "已开饭" }).first().click();
   await expect(page.getByText("勾选即保存")).toBeVisible();
 });
 

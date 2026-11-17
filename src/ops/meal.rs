@@ -1,12 +1,12 @@
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{Datelike, Duration, NaiveDate, Utc};
 use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
 use super::{audit_user, GENERATE_HORIZON_DAYS};
 use crate::domain::{
-    dsl_prompt, local_script_dsl, meal_is_locked, order_color, parse_dsl_text, resolve_meal,
-    shanghai_at, shanghai_date, upsert_override, valid_slot, MealDsl, SLOTS,
+    dsl_prompt, is_work_day, local_script_dsl, meal_is_locked, order_color, parse_dsl_text,
+    resolve_meal, shanghai_at, shanghai_date, upsert_override, valid_slot, MealDsl, WeekDay, SLOTS,
 };
 use crate::error::AppError;
 use crate::extract::CurrentUser;
@@ -66,6 +66,91 @@ pub async fn put_shift(
         Some("shift"),
         Some(user.account_id.to_string()),
         json!({"kind": kind}),
+    )
+    .await?;
+    Ok(json!({
+        "id": template_id,
+        "dsl": dsl,
+        "generated": written,
+    }))
+}
+
+/// 改循环本身：上二休四改工作日的某一餐，自定义改星期几的某一餐。
+/// 未锁定的同一餐次例外会被清掉，之后按新循环生成。
+pub async fn put_cycle(
+    state: &AppState,
+    user: &CurrentUser,
+    slot: &str,
+    ordering: bool,
+    weekday: Option<u8>,
+) -> Result<Value, AppError> {
+    let hit = authorize(&user.assignments, Perm::ShiftSelfWrite, None)?;
+    if !valid_slot(slot) {
+        return Err(AppError::bad("slot_invalid", "餐次只有早、中、晚"));
+    }
+    let Some((template_id, mut dsl)) = load_template(state, user.account_id).await? else {
+        return Err(AppError::bad("shift_required", "请先选择班制"));
+    };
+    if dsl.mode == "work2_rest4" {
+        dsl.slots.set(slot, ordering);
+    } else if dsl.mode == "custom" {
+        let Some(weekday) = weekday else {
+            return Err(AppError::bad("weekday_required", "自定义排班要指定星期"));
+        };
+        if !(1..=7).contains(&weekday) {
+            return Err(AppError::bad("weekday_invalid", "星期从周一到周日"));
+        }
+        if dsl.week.len() != 7 {
+            dsl.week = (1..=7).map(WeekDay::blank).collect();
+        }
+        let Some(day) = dsl.week.iter_mut().find(|day| day.weekday == weekday) else {
+            return Err(AppError::bad("weekday_invalid", "星期从周一到周日"));
+        };
+        match slot {
+            "breakfast" => day.breakfast = ordering,
+            "lunch" => day.lunch = ordering,
+            "dinner" => day.dinner = ordering,
+            _ => {}
+        }
+    } else {
+        return Err(AppError::bad("shift_kind_invalid", "班制只有上二休四和自定义"));
+    }
+    let now = state.clock.now();
+    let mode_custom = dsl.mode == "custom";
+    let weekday_filter = weekday;
+    let lock_time = state.config.lock_time;
+    dsl.overrides.retain(|item| {
+        if item.slot != slot {
+            return true;
+        }
+        if meal_is_locked(item.date, lock_time, now) {
+            return true;
+        }
+        if mode_custom {
+            let Some(weekday) = weekday_filter else {
+                return true;
+            };
+            return item.date.weekday().number_from_monday() as u8 != weekday;
+        }
+        false
+    });
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("UPDATE meal_template SET dsl = $1, updated_at = $2 WHERE id = $3")
+        .bind(serde_json::to_value(&dsl).map_err(|_| AppError::internal())?)
+        .bind(now)
+        .bind(template_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let written = generate_range(state, user.account_id, horizon(state)).await?;
+    audit_user(
+        state,
+        user,
+        &hit,
+        "meal_cycle",
+        Some("meal_template"),
+        Some(template_id.to_string()),
+        json!({"slot": slot, "ordering": ordering, "weekday": weekday}),
     )
     .await?;
     Ok(json!({
@@ -175,7 +260,17 @@ pub async fn put_slot(
     let mut order_updated = false;
     if !locked {
         persist_lock_if_needed(state, date).await?;
-        order_updated = write_resolved(state, user.account_id, date, slot, &dsl, "dsl").await?;
+        let kind = shift_kind(state, user.account_id).await?;
+        order_updated = write_resolved(
+            state,
+            user.account_id,
+            date,
+            slot,
+            &dsl,
+            "dsl",
+            kind.as_deref(),
+        )
+        .await?;
     }
     audit_user(
         state,
@@ -659,12 +754,15 @@ pub async fn generate_range(
     let mut written = 0u32;
     let mut date = *dates.start();
     let end = *dates.end();
+    let kind = shift_kind(state, account_id).await?;
     while date <= end {
         if meal_is_locked(date, state.config.lock_time, state.clock.now()) {
             persist_lock_if_needed(state, date).await?;
         } else {
             for slot in SLOTS {
-                if write_resolved(state, account_id, date, slot, &dsl, "dsl").await? {
+                if write_resolved(state, account_id, date, slot, &dsl, "dsl", kind.as_deref())
+                    .await?
+                {
                     written += 1;
                 }
             }
@@ -674,6 +772,14 @@ pub async fn generate_range(
     Ok(written)
 }
 
+async fn shift_kind(state: &AppState, account_id: Uuid) -> Result<Option<String>, AppError> {
+    let kind = sqlx::query_scalar("SELECT kind FROM shift_plan WHERE account_id = $1")
+        .bind(account_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    Ok(kind)
+}
+
 async fn write_resolved(
     state: &AppState,
     account_id: Uuid,
@@ -681,6 +787,7 @@ async fn write_resolved(
     slot: &str,
     dsl: &MealDsl,
     source: &str,
+    shift_kind: Option<&str>,
 ) -> Result<bool, AppError> {
     if meal_is_locked(date, state.config.lock_time, state.clock.now()) {
         return Ok(false);
@@ -729,7 +836,16 @@ async fn write_resolved(
         .await?;
         return Ok(true);
     }
-    if resolved.explicit || existing.is_some() {
+    // 循环里明确关掉的餐要落成「不报」，这样窗口往前滑时不会又变回未定或自动报上。
+    // 上二休四的休息日仍不写行。没选班制、只是某一天手改的，也不把其它天写成不报。
+    let pattern_skip = match shift_kind {
+        Some("work2_rest4") => dsl
+            .anchor_date
+            .is_some_and(|anchor| is_work_day(date, anchor) && !dsl.slots.get(slot)),
+        Some("custom") => true,
+        _ => false,
+    };
+    if resolved.explicit || existing.is_some() || pattern_skip {
         upsert_order(
             state,
             account_id,
@@ -1056,16 +1172,17 @@ pub async fn home_board(state: &AppState, user: &CurrentUser) -> Result<Value, A
                 row.get::<NaiveDate, _>("meal_date") == date
                     && row.get::<String, _>("slot") == *slot
             });
-            let state_name = if locked {
-                "locked"
-            } else if row.is_none() {
+            let state_name = if row.is_none() {
                 "unset"
             } else if row.unwrap().get::<bool, _>("ordering") {
                 "ordering"
             } else {
                 "skip"
             };
-            slots.insert((*slot).to_string(), json!({"state": state_name}));
+            slots.insert(
+                (*slot).to_string(),
+                json!({"state": state_name, "locked": locked}),
+            );
         }
         days.push(json!({"date": date, "locked": locked, "slots": slots}));
     }
