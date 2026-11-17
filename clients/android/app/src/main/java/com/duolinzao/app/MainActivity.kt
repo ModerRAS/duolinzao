@@ -9,6 +9,7 @@ import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.PermissionRequest
@@ -46,6 +47,15 @@ class MainActivity : ComponentActivity() {
     private var appHost: String = ""
     private var baseUrl: String = ""
     private var fileCallback: ValueCallback<Array<Uri>>? = null
+    // null = 未处于「已回首页、再按一次退出」状态；不能用 0L：
+    // 开机 2 秒内 uptimeMillis() 还很小，会被误判成双击直接退出。
+    private var lastBackPress: Long? = null
+    // 是否正在显示网络错误页。loadDataWithBaseURL 异步提交，showOfflinePage() 里
+    // 紧跟的 clearHistory() 跑在错误页入栈之前，错误页仍会留在历史里（真机复现：
+    // 点「重试」成功回首页后按 BACK，退回的是 data: 错误页）。
+    // 所以在「重试」导航完成后再清一次历史，保证错误页不成为可回退历史。
+    private var offlinePageShown = false
+    private var clearHistoryAfterNav = false
 
     private val filePicker =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -99,7 +109,29 @@ class MainActivity : ComponentActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    if (webView.canGoBack()) webView.goBack() else finish()
+                    // BACK 状态机（判定逻辑抽在 BackPolicy，JVM 单测覆盖）：
+                    // 1. 2 秒窗口内再按 = 退出。必须先于 canGoBack 判断：loadUrl
+                    //    在重定向 / SSL error 等情况下可能新增历史条目，先看 canGoBack
+                    //    会让第二次按 BACK 走 goBack，双击退出失效；
+                    // 2. 有历史走历史（goBack 属于导航，重置待退出状态，避免跨页误退）；
+                    // 3. 无历史：SPA 切页与地址栏同 URL，URL 无法区分内页，
+                    //    一律 load home + toast，并记下待退出时间。
+                    val now = SystemClock.uptimeMillis()
+                    when (BackPolicy.decide(now, webView.canGoBack(), lastBackPress)) {
+                        BackAction.FINISH -> {
+                            lastBackPress = null
+                            finish()
+                        }
+                        BackAction.GO_BACK -> {
+                            lastBackPress = null
+                            webView.goBack()
+                        }
+                        BackAction.ARM_HOME -> {
+                            lastBackPress = now
+                            webView.loadUrl("$baseUrl/")
+                            Toast.makeText(this@MainActivity, "已回首页，再按一次退出", Toast.LENGTH_SHORT).show()
+                        }
+                    }
                 }
             },
         )
@@ -142,7 +174,11 @@ class MainActivity : ComponentActivity() {
                 val uri = request.url
                 val scheme = uri.scheme?.lowercase()
                 if (scheme == "http" || scheme == "https") {
-                    if (uri.host == appHost) return false
+                    if (uri.host == appHost) {
+                        // 错误页上的「重试」是普通链接导航：标记目标页加载完成后清历史。
+                        if (offlinePageShown) clearHistoryAfterNav = true
+                        return false
+                    }
                     openExternal(uri)
                     return true
                 }
@@ -161,7 +197,19 @@ class MainActivity : ComponentActivity() {
                 error: WebResourceError,
             ) {
                 if (!request.isForMainFrame) return
+                // 主框架加载失败：这次「重试」没有成功，取消待清理标记
+                // （错误页会重新显示，等下一次重试成功再清历史）。
+                clearHistoryAfterNav = false
                 showOfflinePage()
+            }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                if (!offlinePageShown || !clearHistoryAfterNav) return
+                // 「重试」目标页（正常页面）已加载完成：此时错误页已经是 back 条目，
+                // 清历史才能真正把它从回退栈里抹掉。
+                clearHistoryAfterNav = false
+                offlinePageShown = false
+                view.clearHistory()
             }
         }
 
@@ -215,6 +263,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showOfflinePage() {
+        offlinePageShown = true
         val html = """
             <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -232,6 +281,12 @@ class MainActivity : ComponentActivity() {
             </div></body></html>
         """.trimIndent()
         webView.loadDataWithBaseURL(baseUrl, html, "text/html", "utf-8", null)
+        // 错误页不该成为可回退的历史条目：否则 BACK 会退回加载失败的 URL、
+        // 甚至反复触发错误页，而不是按「回首页 / 双击退出」处理。
+        // 页面里保留「重试」链接作为唯一入口，清历史不影响重试。
+        // 这里是第一道清理（先清掉失败导航留下的条目）；loadData 异步提交，
+        // 错误页自身在重试成功后由 shouldOverrideUrlLoading + onPageFinished 再清一次。
+        webView.clearHistory()
     }
 
     private fun openExternal(uri: Uri) {

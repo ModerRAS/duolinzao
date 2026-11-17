@@ -28,6 +28,9 @@ jobs:
       - name: assembleDebug
         working-directory: clients/android
         run: ./gradlew :app:assembleDebug --stacktrace
+      - name: testDebugUnitTest（壳 BACK 状态机 JVM 单测）
+        working-directory: clients/android
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
 
   ui-test:
     # mock 冒烟（不连真后端），与 assemble 并行；不进主 ci.yml needs，不挡后端主 CI。
