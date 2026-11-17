@@ -85,6 +85,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/me/totp/confirm", post(totp_confirm))
         .route("/api/me/canteens", put(bind_canteens).get(my_canteens))
         .route("/api/me/shift", put(put_shift).get(get_shift))
+        .route("/api/me/meal-cycle", put(put_cycle))
         .route("/api/me/meals", get(my_meals))
         .route("/api/me/home", get(my_home))
         .route("/api/me/meal-template", get(my_template))
@@ -684,6 +685,23 @@ async fn put_shift(
 ) -> Result<Json<Value>, AppError> {
     Ok(Json(
         meal::put_shift(&state, &user, &body.kind, body.anchor_date, body.canteen_id).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct CycleBody {
+    slot: String,
+    ordering: bool,
+    weekday: Option<u8>,
+}
+
+async fn put_cycle(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Json(body): Json<CycleBody>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        meal::put_cycle(&state, &user, &body.slot, body.ordering, body.weekday).await?,
     ))
 }
 

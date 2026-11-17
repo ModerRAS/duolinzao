@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { explain, logout, personName } from "../api";
-import { auth, can, managedCanteens } from "../session";
+import { api, explain, logout, personName } from "../api";
+import { auth, can, managedCanteens, refreshSession } from "../session";
 import { loadVersion, versionFooter } from "../version";
 import AccountPage from "./AccountPage.vue";
 import AlertPage from "./AlertPage.vue";
@@ -47,6 +47,7 @@ const emit = defineEmits<{ "to-employee": [] }>();
 const tab = ref<Tab>("headcount");
 const sub = ref<Sub>("tabs");
 const dishId = ref<string | null>(null);
+const newCanteen = ref("");
 
 const canteens = computed(() => managedCanteens());
 const showCanteen = computed(
@@ -76,7 +77,7 @@ const groups = computed((): { name: string; items: MoreItem[] }[] => {
     { key: "email", label: "邮箱", show: can("system.super") },
     { key: "threshold", label: "阈值", show: can("rating.strong_alert_config") },
     { key: "recover", label: "找回", show: can("user.recover") },
-    { key: "llm", label: "LLM", show: can("system.super") },
+    { key: "llm", label: "LLM", show: false },
     { key: "appSigning", label: "应用签名", show: can("system.super") },
   ];
   const account: MoreItem[] = [
@@ -161,6 +162,23 @@ function editDish(id: string | null) {
   sub.value = "dishEdit";
 }
 
+async function createCanteen() {
+  const name = newCanteen.value.trim();
+  if (!name) return;
+  try {
+    const created = await api<{ id: string }>("/api/admin/canteens", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    newCanteen.value = "";
+    await refreshSession();
+    auth.canteenId = created.id;
+    ElMessage.success("食堂已建立");
+  } catch (error) {
+    ElMessage.error(explain(error));
+  }
+}
+
 async function tap(item: MoreItem) {
   if (item.key === "employee") {
     emit("to-employee");
@@ -217,6 +235,10 @@ onMounted(() => {
     </header>
 
     <div class="body">
+      <form v-if="can('system.super') && sub === 'tabs' && (canteens.length === 0 || tab === 'more')" class="create-canteen" @submit.prevent="createCanteen">
+        <el-input v-model="newCanteen" placeholder="新食堂名称" @keyup.enter="createCanteen" />
+        <el-button type="primary" native-type="submit">新建食堂</el-button>
+      </form>
       <template v-if="sub === 'tabs'">
         <OverviewPage v-if="tab === 'headcount'" />
         <OptimizePage v-else-if="tab === 'optimize'" />
@@ -297,6 +319,8 @@ onMounted(() => {
 .brand p { font-size: 12px; color: #6b7280; margin: 2px 0 0; }
 .picker { width: 128px; flex-shrink: 0; }
 .body { flex: 1; overflow: auto; padding: 0 16px 12px; }
+.create-canteen { display: flex; gap: 8px; margin-bottom: 12px; }
+.create-canteen .el-input { flex: 1; }
 .body :deep(.page-title) { display: none; }
 .more { display: flex; flex-direction: column; gap: 4px; padding-bottom: 8px; }
 .group { margin-top: 12px; }

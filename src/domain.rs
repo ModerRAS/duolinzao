@@ -56,6 +56,11 @@ pub fn score_window_open(meal_date: NaiveDate, after: NaiveTime, now: DateTime<U
     now >= start && now < end
 }
 
+/// 餐后时刻一到，这一餐已经开饭。供应从这时起冻结，评分对着开饭时的选定。
+pub fn service_started(meal_date: NaiveDate, after: NaiveTime, now: DateTime<Utc>) -> bool {
+    now >= shanghai_at(meal_date, after)
+}
+
 pub fn is_work_day(date: NaiveDate, anchor: NaiveDate) -> bool {
     (date - anchor).num_days().rem_euclid(6) < 2
 }
@@ -681,6 +686,16 @@ mod tests {
             NaiveDate::from_ymd_opt(y, m, d).unwrap(),
             NaiveTime::from_hms_opt(hh, mm, 0).unwrap(),
         )
+    }
+
+    #[test]
+    fn service_starts_at_the_meal_after_time() {
+        let day = NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
+        let after = NaiveTime::from_hms_opt(8, 30, 0).unwrap();
+        assert!(!service_started(day, after, at(2026, 10, 10, 8, 29)));
+        assert!(service_started(day, after, at(2026, 10, 10, 8, 30)));
+        assert!(!score_window_open(day, after, at(2026, 10, 10, 8, 29)));
+        assert!(score_window_open(day, after, at(2026, 10, 10, 8, 30)));
     }
 
     #[test]

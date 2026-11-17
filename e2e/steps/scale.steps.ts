@@ -552,7 +552,9 @@ When("员工尝试修改已锁定餐次", async ({ page }) => {
   // UI 已锁：按钮变「X 已锁定」且 disabled。
   const md = target.slice(5);
   const panel = page.locator("article.panel", { hasText: md }).first();
-  await expect(panel.getByRole("button", { name: `${m.slot} 已锁定` })).toBeVisible({ timeout: 15000 });
+  await expect(panel.getByRole("button", { name: new RegExp(`^${m.slot} .+ 已锁定$`) })).toBeVisible({
+    timeout: 15000,
+  });
   // 接口尝试：403 meal_locked。
   const emp = await loginSession(e.user, e.pass);
   const s = await rootSession();

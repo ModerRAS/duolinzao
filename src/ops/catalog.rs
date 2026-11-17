@@ -9,8 +9,8 @@ use uuid::Uuid;
 use super::audit_user;
 use crate::crypto::sniff_image;
 use crate::domain::{
-    empty_groups, meal_is_locked, next_slot, push_group, score_window_open, shanghai_date,
-    tone_from_mean, valid_kind, valid_slot, week_start, KINDS, SLOTS,
+    empty_groups, meal_is_locked, next_slot, push_group, score_window_open, service_started,
+    shanghai_date, tone_from_mean, valid_kind, valid_slot, week_start, KINDS, SLOTS,
 };
 use crate::error::AppError;
 use crate::extract::CurrentUser;
@@ -571,6 +571,7 @@ pub async fn selection_slot(
         "date": date,
         "slot": slot,
         "expected_headcount": people.len(),
+        "frozen": service_started(date, slot_after(state, slot), state.clock.now()),
         "groups": grouped_candidates(items),
         "next": {"date": next_date, "slot": next_slot_name},
     }))
@@ -600,6 +601,12 @@ pub async fn put_selection(
                 "只能选择本食堂当前启用的餐品",
             ));
         }
+    }
+    if service_started(date, slot_after(state, slot), state.clock.now()) {
+        return Err(AppError::bad(
+            "menu_frozen",
+            "这一餐已经开饭，供应不能再改",
+        ));
     }
     let mut tx = state.pool.begin().await?;
     sqlx::query("DELETE FROM menu_pick WHERE canteen_id = $1 AND meal_date = $2 AND slot = $3")
@@ -733,6 +740,7 @@ pub async fn selection_week(
                 (*slot).to_string(),
                 json!({
                     "expected_headcount": people.len(),
+                    "frozen": service_started(day, slot_after(state, slot), state.clock.now()),
                     "groups": grouped_candidates(items),
                 }),
             );

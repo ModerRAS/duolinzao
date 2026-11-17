@@ -1,6 +1,7 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 import { createBdd, test } from "playwright-bdd";
 import {
+  addDaysStr,
   canteen,
   chooseShift,
   ensureBound,
@@ -13,6 +14,7 @@ import {
   password,
   rememberRegisteredUser,
   rootSession,
+  shanghaiToday,
   submitInviteRegister,
 } from "./helpers";
 
@@ -238,12 +240,12 @@ Given("员工已登录且尚未选择班制", async ({ page }) => {
 
 When("打开选择班制页", async ({ page }) => {
   await page.getByRole("button", { name: "选择班制" }).click();
-  await expect(page.getByText("只有上二休四和自定义排班。用描述生成模板是子流程，不是第三种班制。")).toBeVisible();
+  await expect(page.getByText("只有上二休四和自定义排班。")).toBeVisible();
 });
 
 Then("只提供「上二休四」和「自定义排班」", async ({ page }) => {
   await expect(page.getByText("自定义排班", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "用描述生成模板" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "用描述生成模板" })).toHaveCount(0);
 });
 
 Then("不出现「上五休二」或其它已砍班制", async ({ page }) => {
@@ -261,11 +263,54 @@ Then("班制保存成功", async ({ page }) => {
   await expect(page.getByText("尚未选择班制，默认不报任何一餐。")).toHaveCount(0);
 });
 
-Then("「用描述生成模板」作为模板生成器入口而非第三种班制", async ({ page }) => {
-  // 保存后回到报餐首页，重进选择班制页再确认入口仍在。
+Then("不提供用描述生成模板的入口", async ({ page }) => {
+  await expect(page.getByRole("button", { name: "用描述生成模板" })).toHaveCount(0);
+  await expect(page.getByText("上五休二")).toHaveCount(0);
+});
+
+function isWorkDay(date: string, anchor: string) {
+  const ms = Date.parse(`${date}T00:00:00Z`) - Date.parse(`${anchor}T00:00:00Z`);
+  const days = Math.round(ms / 86_400_000);
+  return ((days % 6) + 6) % 6 < 2;
+}
+
+Given("员工已选择上二休四", async ({ page }) => {
+  await chooseShift(page);
+});
+
+When("在选择班制里把工作日早餐改成不报", async ({ page }) => {
   await openTab(page, "报餐");
   await page.getByRole("button", { name: "选择班制" }).click();
-  await expect(page.getByRole("button", { name: "用描述生成模板" })).toBeVisible();
+  await page.getByRole("button", { name: "早餐 报" }).click();
+  await expect(page.getByRole("button", { name: "早餐 不报" })).toBeVisible();
+});
+
+Then("个人 DSL 的早餐循环为不报", async ({ page }) => {
+  const body = await page.request.get("/api/me/meal-template").then((r) => r.json());
+  expect(body.dsl.mode).toBe("work2_rest4");
+  expect(body.dsl.slots.breakfast).toBe(false);
+  expect(body.dsl.slots.lunch).toBe(true);
+  expect(body.dsl.slots.dinner).toBe(true);
+});
+
+Then("尚未锁定的工作日早餐都是不报", async ({ page }) => {
+  const template = await page.request.get("/api/me/meal-template").then((r) => r.json());
+  const anchor = template.dsl.anchor_date as string;
+  const start = shanghaiToday();
+  const end = addDaysStr(start, 14);
+  const meals = await page.request.get(`/api/me/meals?start=${start}&end=${end}`).then((r) => r.json());
+  const locked = new Set<string>(meals.locked_dates ?? []);
+  let seen = 0;
+  for (let offset = 0; offset <= 14; offset += 1) {
+    const date = addDaysStr(start, offset);
+    if (!isWorkDay(date, anchor) || locked.has(date)) continue;
+    seen += 1;
+    const row = (meals.items ?? []).find((item: { date: string; slot: string }) => item.date === date && item.slot === "breakfast");
+    expect(row?.ordering, date).toBe(false);
+    const lunch = (meals.items ?? []).find((item: { date: string; slot: string }) => item.date === date && item.slot === "lunch");
+    expect(lunch?.ordering, `${date} lunch`).toBe(true);
+  }
+  expect(seen).toBeGreaterThan(0);
 });
 
 // 场景：本周报餐绿橙与跨食堂提示

@@ -282,7 +282,7 @@ Then("界面不出现倾向、权重、Elo 或「预计评分」等文案", asyn
 });
 
 When("点进某一餐并在各类内勾选供应餐品", async ({ page }) => {
-  await page.locator("button.slot-cell").first().click();
+  await page.locator("button.slot-cell").filter({ hasNotText: "已开饭" }).first().click();
   await expect(page.getByText("勾选即保存")).toBeVisible();
   const card = page.locator(".dish-card").first();
   await expect(card).toBeVisible();

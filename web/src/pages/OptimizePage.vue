@@ -23,6 +23,7 @@ import { auth } from "../session";
 
 interface WeekCell {
   expected_headcount: number;
+  frozen?: boolean;
   groups: Groups<Candidate>;
 }
 interface WeekDay {
@@ -36,6 +37,7 @@ const date = ref(shanghaiToday());
 const slot = ref<Slot>("lunch");
 const groups = ref<Groups<Candidate>>({ 菜: [], 饭: [], 汤: [] });
 const headcount = ref(0);
+const frozen = ref(false);
 const next = ref<{ date: string; slot: Slot } | null>(null);
 const weekDays = ref<WeekDay[]>([]);
 
@@ -76,11 +78,13 @@ async function loadPick() {
   anchor.value = week.week_start;
   const body = await api<{
     expected_headcount: number;
+    frozen?: boolean;
     groups: Groups<Candidate>;
     next: { date: string; slot: Slot };
   }>(`/api/canteens/${auth.canteenId}/selection?date=${date.value}&slot=${slot.value}`);
   groups.value = body.groups;
   headcount.value = body.expected_headcount;
+  frozen.value = Boolean(body.frozen);
   next.value = body.next;
 }
 
@@ -94,10 +98,15 @@ async function load() {
 }
 
 async function save(nextGroups: Groups<Candidate>) {
+  if (frozen.value) {
+    ElMessage.warning("这一餐已经开饭，供应不能再改");
+    return;
+  }
   const ids = KINDS.flatMap((kind) => nextGroups[kind].filter((item) => item.selected).map((item) => item.dish_id));
   try {
     const body = await api<{
       expected_headcount: number;
+      frozen?: boolean;
       groups: Groups<Candidate>;
       next: { date: string; slot: Slot };
     }>(`/api/canteens/${auth.canteenId}/selection/${date.value}/${slot.value}`, {
@@ -106,6 +115,7 @@ async function save(nextGroups: Groups<Candidate>) {
     });
     groups.value = body.groups;
     headcount.value = body.expected_headcount;
+    frozen.value = Boolean(body.frozen);
     next.value = body.next;
   } catch (error) {
     ElMessage.error(explain(error));
@@ -113,6 +123,7 @@ async function save(nextGroups: Groups<Candidate>) {
 }
 
 function toggle(kind: Kind, index: number) {
+  if (frozen.value) return;
   const copy: Groups<Candidate> = {
     菜: groups.value.菜.map((item) => ({ ...item })),
     饭: groups.value.饭.map((item) => ({ ...item })),
@@ -160,7 +171,7 @@ watch(() => [auth.canteenId, date.value, slot.value, mode.value], load, { immedi
         <section v-for="day in weekDays" :key="day.date" class="day-col">
           <header>{{ weekdayLabel(day.date) }} {{ day.date.slice(5) }}</header>
           <button v-for="item in SLOTS" :key="item" type="button" class="slot-cell" @click="openSlot(day.date, item)">
-            <div class="slot-name">{{ SLOT_NAME[item] }} · {{ day.slots[item].expected_headcount }} 人</div>
+            <div class="slot-name">{{ SLOT_NAME[item] }} · {{ day.slots[item].expected_headcount }} 人<span v-if="day.slots[item].frozen"> · 已开饭</span></div>
             <div v-for="kind in KINDS" :key="kind" class="kind-line">
               <span class="k">{{ kind }}</span>
               <span v-if="day.slots[item].groups[kind].length" class="names">
@@ -183,6 +194,7 @@ watch(() => [auth.canteenId, date.value, slot.value, mode.value], load, { immedi
           <el-button link type="primary" @click="mode = 'week'">返回周视图</el-button>
           <span class="label">选菜优化</span>
           <span class="pills">预计就餐 {{ headcount }} 人 · 色阶按偏好高低</span>
+          <span v-if="frozen" class="frozen-note">这一餐已经开饭，供应已定，不能再改</span>
         </div>
         <div class="days">
           <button
@@ -199,7 +211,8 @@ watch(() => [auth.canteenId, date.value, slot.value, mode.value], load, { immedi
           </button>
         </div>
         <div class="autosave">
-          <span class="ok">● 勾选即保存</span>
+          <span v-if="frozen" class="frozen-note">已开饭</span>
+          <span v-else class="ok">● 勾选即保存</span>
           <el-icon :size="16" color="#9ca3af"><QuestionFilled /></el-icon>
         </div>
       </div>
@@ -223,7 +236,7 @@ watch(() => [auth.canteenId, date.value, slot.value, mode.value], load, { immedi
               v-for="(item, index) in groups[kind]"
               :key="item.dish_id"
               class="dish-card"
-              :class="{ selected: item.selected }"
+              :class="{ selected: item.selected, frozen }"
               :style="{ borderColor: toneColor(item.tone) }"
               @click="toggle(kind, index)"
             >
@@ -234,7 +247,7 @@ watch(() => [auth.canteenId, date.value, slot.value, mode.value], load, { immedi
                   <el-tag v-for="tag in item.taste_tags" :key="tag" size="small" effect="plain" round>{{ tag }}</el-tag>
                 </div>
               </div>
-              <el-checkbox :model-value="item.selected" @click.stop @change="toggle(kind, index)" />
+              <el-checkbox :model-value="item.selected" :disabled="frozen" @click.stop @change="toggle(kind, index)" />
             </div>
             <p v-if="groups[kind].length === 0" class="muted">这一组没有启用的餐品</p>
           </section>
@@ -276,6 +289,8 @@ watch(() => [auth.canteenId, date.value, slot.value, mode.value], load, { immedi
 .right { width: 240px; }
 .col h3, .right h3 { margin: 0 0 10px; }
 .dish-card, .sel-card { display: flex; align-items: center; gap: 10px; border: 2px solid; border-radius: 10px; padding: 10px; margin-bottom: 8px; cursor: pointer; }
+.dish-card.frozen { cursor: default; }
+.frozen-note { color: #b86e00; font-size: 13px; font-weight: 600; }
 .meta { flex: 1; min-width: 0; }
 .name { font-weight: 600; }
 .tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }

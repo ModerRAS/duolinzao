@@ -64,6 +64,7 @@ struct Api {
     pool: PgPool,
     mailer: Arc<CapturingMailer>,
     scripts: ScriptedBackend,
+    clock: Arc<ManualClock>,
 }
 
 impl Api {
@@ -313,14 +314,15 @@ async fn prepare() -> Api {
     let config = AppConfig::parse(&raw).unwrap();
     let mailer = Arc::new(CapturingMailer::new());
     let scripts = ScriptedBackend::failing_then_script();
+    let clock = Arc::new(ManualClock::new(
+        Utc.with_ymd_and_hms(2026, 10, 10, 2, 0, 0)
+            .single()
+            .unwrap(),
+    ));
     let state = AppState::new(
         pool.clone(),
         config,
-        Arc::new(ManualClock::new(
-            Utc.with_ymd_and_hms(2026, 10, 10, 2, 0, 0)
-                .single()
-                .unwrap(),
-        )),
+        clock.clone(),
         mailer.clone(),
         Arc::new(scripts.clone()),
     )
@@ -331,6 +333,7 @@ async fn prepare() -> Api {
         pool,
         mailer,
         scripts,
+        clock,
     }
 }
 
@@ -775,7 +778,31 @@ async fn phase1_acceptance() {
     assert_no_internal_terms(&week.to_string(), "周视图");
 
     let picked = json!({"dish_ids": [veg_id, rice_id, soup_id]});
+    // 10:00 已过早餐开饭（08:30）。先拨回 08:00 写入供应，再拨回 10:00，开饭后不能再改。
+    api.clock.set(
+        Utc.with_ymd_and_hms(2026, 10, 9, 23, 59, 0)
+            .single()
+            .unwrap(),
+    );
     must(
+        api.call(
+            "PUT",
+            &format!("/api/canteens/{canteen_a}/selection/2026-10-10/breakfast"),
+            Some(&cook),
+            Some(picked.clone()),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "pick breakfast before service",
+    );
+    api.clock.set(
+        Utc.with_ymd_and_hms(2026, 10, 10, 2, 0, 0)
+            .single()
+            .unwrap(),
+    );
+    let frozen = must(
         api.call(
             "PUT",
             &format!("/api/canteens/{canteen_a}/selection/2026-10-10/breakfast"),
@@ -785,9 +812,10 @@ async fn phase1_acceptance() {
             None,
         )
         .await,
-        StatusCode::OK,
-        "pick breakfast",
+        StatusCode::BAD_REQUEST,
+        "breakfast already served",
     );
+    assert_eq!(frozen.json()["error"], "menu_frozen");
     must(
         api.call(
             "PUT",
@@ -1358,7 +1386,10 @@ async fn phase1_acceptance() {
     assert_eq!(home["days"].as_array().unwrap().len(), 7);
     assert_eq!(home["days"][0]["date"], "2026-10-10");
     assert_eq!(home["days"][0]["locked"], true);
-    assert_eq!(home["days"][0]["slots"]["dinner"]["state"], "locked");
+    assert_eq!(home["days"][0]["slots"]["dinner"]["state"], "unset");
+    assert_eq!(home["days"][0]["slots"]["dinner"]["locked"], true);
+    assert_eq!(home["days"][0]["slots"]["breakfast"]["state"], "ordering");
+    assert_eq!(home["days"][0]["slots"]["breakfast"]["locked"], true);
     assert_eq!(home["days"][1]["date"], "2026-10-11");
     assert_eq!(home["days"][1]["locked"], false);
     assert_eq!(home["next"]["date"], "2026-10-10");
@@ -1370,6 +1401,84 @@ async fn phase1_acceptance() {
     let home_text = home.to_string();
     assert!(!home_text.contains("\"mean\""));
     assert!(!home_text.contains("preference"));
+
+    let cycled = must(
+        api.call(
+            "PUT",
+            "/api/me/meal-cycle",
+            Some(&emp1),
+            Some(json!({"slot": "breakfast", "ordering": false})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "cycle breakfast off",
+    )
+    .json();
+    assert_eq!(cycled["dsl"]["slots"]["breakfast"], false);
+    assert_eq!(cycled["dsl"]["slots"]["lunch"], true);
+    let meals = must(
+        api.call(
+            "GET",
+            "/api/me/meals?start=2026-10-12&end=2026-10-18",
+            Some(&emp1),
+            None,
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "meals follow cycle",
+    )
+    .json();
+    assert_eq!(
+        meal(&meals, "2026-10-12", "breakfast").unwrap()["ordering"],
+        false
+    );
+    assert_eq!(
+        meal(&meals, "2026-10-12", "lunch").unwrap()["ordering"],
+        true
+    );
+    assert_eq!(
+        meal(&meals, "2026-10-18", "breakfast").unwrap()["ordering"],
+        false
+    );
+    assert!(
+        meal(&meals, "2026-10-14", "breakfast").is_none(),
+        "休息日不因关掉早餐而写出不报行"
+    );
+    let locked_day = must(
+        api.call(
+            "GET",
+            "/api/me/meals?start=2026-10-10&end=2026-10-10",
+            Some(&emp1),
+            None,
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "locked breakfast stays",
+    )
+    .json();
+    assert_eq!(
+        meal(&locked_day, "2026-10-10", "breakfast").unwrap()["ordering"],
+        true
+    );
+    must(
+        api.call(
+            "PUT",
+            "/api/me/meal-cycle",
+            Some(&emp1),
+            Some(json!({"slot": "breakfast", "ordering": true})),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::OK,
+        "cycle breakfast back on",
+    );
 
     let five = must(
         api.call(
